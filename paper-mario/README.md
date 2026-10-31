@@ -69,6 +69,44 @@ docker run --rm -v "$PWD":/work -w /work pm64hh:decomp python3 tools/port/rom_se
 
 It writes `PaperMario-miyoo-PERSONAL.zip`. It contains your ROM, so keep it to yourself.
 
+## ROM segment metadata (US and PAL)
+
+`tools/port/rom_segments.py` reads only the selected region's
+`refs/papermario/ver/<region>/splat.yaml`; it never opens a ROM.
+With Python and PyYAML available, run from this folder:
+
+```sh
+python3 tools/port/rom_segments.py                 # US: build/game/rom_segments.json (unchanged)
+python3 tools/port/rom_segments.py --region us     # explicit US, same output
+python3 tools/port/rom_segments.py --region pal    # PAL: build/game/pal/rom_segments.json
+python3 tools/port/rom_segments.py --region pal -o /tmp/pal-segments.json
+python3 -B -m unittest discover -s tools/port -p test_rom_segments.py -v
+```
+
+Custom relative output paths are relative to the working directory. Keep custom
+US and PAL destinations separate; PAL is explicitly forbidden from targeting the
+US default path, including resolved symlink aliases. Naming, JSON fields, segment
+order and the final `rom_end: null` are unchanged. Missing or `auto` starts are
+skipped; numeric starts must be nonnegative integers and must not decrease.
+Shared starts (BSS-only segments with zero ROM length) retain their original order.
+Invalid input or write failures preserve an existing result through atomic file
+replacement. Existing file symlinks (including relative targets and chains) stay
+intact: the final referenced regular file is replaced atomically in its own
+directory. A dangling file symlink creates its target if that target's parent
+already exists; missing target directories, loops and nonregular targets are
+rejected. The PAL guard compares the final resolved output and US target paths.
+New files use `0666 & ~umask`; existing targets retain their POSIX permission bits.
+Temporary files never start with permissions broader than the requested mode.
+
+Path resolution and replacement are not protected against concurrent directory
+or symlink changes. Do not retarget paths or run competing writers during
+generation; this is a local build tool, not a filesystem security boundary.
+Atomic replacement creates a new inode: ownership, ACLs and other hard-link
+aliases are not preserved. File synchronization does not guarantee directory
+entry durability across power loss. Tests use synthetic configurations in
+temporary directories only.
+This generates metadata only: `gen_build.py` and the game still support US only.
+
 ## Layout
 
 - `game/port/`: the port: ROM access, audio, the N64 OS layer, the renderer glue
