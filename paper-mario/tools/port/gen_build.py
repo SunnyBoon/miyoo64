@@ -92,16 +92,117 @@ def die(msg):
     print('gen_build.py: ' + msg, file=sys.stderr)
     sys.exit(1)
 
+def prove_linker_follow(lines, headers, index, symbol, previous):
+    """Recognize Splat's end-of-predecessor relation, never evaluate a VMA.
+
+    Only the generated section/NOLOAD pair and its bounded trailer grammar are
+    supported. Object sizes and the location counter remain the N64 linker's job.
+    """
+    def fail():
+        raise ValueError(f'unsupported linker section address: {lines[index].strip()} '
+                         '(unproven predecessor VRAM end)')
+
+    if previous is None or symbol != previous['name'] + '_VRAM_END':
+        fail()
+    name = previous['name']
+    # Count all assignments, including compound assignments and definitions in
+    # other scopes. A matching spelling alone is not evidence of an end address.
+    assignment = r'\b' + re.escape(symbol) + r'\s*(?:(?:<<|>>|[+*/%&|^\-])?=)'
+    definitions = [i for i, line in enumerate(lines) if re.search(assignment, line)]
+    if len(definitions) != 1 or len(re.findall(assignment, ''.join(lines))) != 1:
+        fail()
+    end = definitions[0]
+    if end >= index or lines[end].strip() != symbol + ' = .;':
+        fail()
+
+    # Uniqueness and BSS placement must include future headers: parse_ld later
+    # merges a matching BSS into its owner even if it occurs after the follower.
+    owners = [position for position, header in enumerate(headers) if header[1] == name]
+    bss = [position for position, header in enumerate(headers) if header[1] == name + '_bss']
+    follower = next(header[1] for header in headers if header[0] == index)
+    if len(owners) != 1 or len(bss) > 1 or sum(h[1] == follower for h in headers) != 1:
+        fail()
+    if bss and (bss[0] != owners[0] + 1 or headers[bss[0]][0] >= end or
+                headers[bss[0]][2] != '(NOLOAD)'):
+        fail()
+    preceding = [header for header in headers if header[0] < index]
+    start, last_name, address = preceding[-1]
+    if last_name == name + '_bss' and address == '(NOLOAD)':
+        if len(preceding) < 2 or preceding[-2][1] != name:
+            fail()
+        start = preceding[-2][0]
+    elif last_name != name:
+        fail()
+
+    # Walk the predecessor's complete body, optional BSS, and final trailer.
+    # A stale end marker before BSS or before a later ALIGN must not be accepted.
+    depth = 0
+    expecting_body = True
+    closed = False
+    end_proved = False
+    for i in range(start + 1, index):
+        text = lines[i].strip()
+        if not text:
+            continue
+        if expecting_body:
+            if text != '{':
+                fail()
+            expecting_body = False
+            depth = 1
+            continue
+        if depth:
+            depth += text.count('{') - text.count('}')
+            if depth not in (0, 1) or (depth == 0 and text != '}'):
+                fail()
+            if depth == 0:
+                closed = True
+            continue
+        if re.fullmatch(
+                r'\.' + re.escape(name) + r'_bss \(NOLOAD\) : SUBALIGN\([1-9][0-9]*\)', text):
+            if i > end:
+                fail()
+            expecting_body = True
+            closed = False
+            continue
+        if i == end:
+            if not closed:
+                fail()
+            end_proved = True
+            continue
+        align = re.fullmatch(r'\. = ALIGN\(\., ([1-9][0-9]*)\);', text)
+        if align:
+            alignment = int(align[1])
+            if i > end or alignment & (alignment - 1):
+                fail()
+            continue
+        # These generated statements cannot change the VMA location counter.
+        safe = (r'__romPos \+= SIZEOF\(\.' + re.escape(name) + r'\);',
+                r'__romPos = ALIGN\(__romPos, [1-9][0-9]*\);',
+                r'[A-Za-z_][A-Za-z0-9_]*_ROM_(?:START|END) = __romPos;',
+                r'[A-Za-z_][A-Za-z0-9_]*_VRAM = ADDR\(\.[A-Za-z0-9_]+\);')
+        if not any(re.fullmatch(pattern, text) for pattern in safe):
+            fail()
+    if depth or expecting_body or not closed or not end_proved:
+        fail()
+    return {'segment': name, 'symbol': symbol}
+
+
 def parse_ld(path, region='us'):
     """Segments in link order: name, vram (None = follows the previous), objects per kind."""
     segs, cur = [], None
-    sec_re = re.compile(r'^    \.([A-Za-z0-9_]+)(?: (0x[0-9A-Fa-f]+|\(NOLOAD\)))? :')
+    sec_re = re.compile(r'^    \.([A-Za-z0-9_]+)(.*?) :')
     section = r'(\.[a-z]+)' if region == 'us' else r'(\.[a-z]+|COMMON)'
     obj_re = re.compile(r'^        (ver/' + re.escape(region) + r'/build/\S+\.o)\(' + section + r'\*?\);')
-    for line in ninja_lines(path):
+    lines = list(ninja_lines(path))
+    headers = [(i, m.group(1), m.group(2).strip())
+               for i, line in enumerate(lines) if (m := sec_re.match(line))]
+    for index, line in enumerate(lines):
         m = sec_re.match(line)
         if m:
-            name, addr = m.group(1), m.group(2)
+            name, addr = m.group(1), m.group(2).strip()
+            follow = None
+            if addr and addr != '(NOLOAD)' and not re.fullmatch(r'0x[0-9A-Fa-f]+', addr):
+                follow = prove_linker_follow(lines, headers, index, addr, segs[-1] if segs else None)
             if name.endswith('_bss') and addr == '(NOLOAD)':
                 cur = next((s for s in reversed(segs) if s['name'] == name[:-4]), None)
                 if cur is None:
@@ -109,6 +210,8 @@ def parse_ld(path, region='us'):
                     segs.append(cur)
                 continue
             cur = {'name': name, 'vram': int(addr, 16) if addr and addr.startswith('0x') else None, 'objs': []}
+            if follow is not None:
+                cur['vram_follow'] = follow
             segs.append(cur)
             continue
         if re.match(r'^    \.[A-Za-z0-9_]+.* :', line):

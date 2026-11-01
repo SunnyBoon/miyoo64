@@ -279,6 +279,93 @@ class BuildGeneratorTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('missing ROM ranges', result.stderr)
 
+    def test_proven_follow_preserves_rom_symbols_and_isolation(self):
+        for region in ('us', 'pal'):
+            with self.subTest(region=region):
+                result = self.cli('--region', region)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                before = self.generated(region)
+                other = self.snapshot('pal' if region == 'us' else 'us')
+                path = self.decomp / f'ver/{region}/papermario.ld'
+                text = path.read_text()
+                obj = f'ver/{region}/build/assets/{region}/font.c.o'
+                text = text.replace(f'    .font 0x00000000 :\n        {obj}(.text);',
+                    f'    .font 0x00000000 : AT(font_ROM_START) SUBALIGN(8)\n'
+                    f'    {{\n        {obj}(.text);\n    }}\n'
+                    '    . = ALIGN(., 16);\n    font_VRAM_END = .;')
+                path.write_text(text.replace('.map 0x80240000 :', '.map font_VRAM_END :'))
+                result = self.cli('--region', region)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                after = self.generated(region)
+                for name in ('rom_syms.ld', 'port_segtab.c', 'pc.ninja'):
+                    if name == 'rom_syms.ld':
+                        self.assertEqual(after[name], before[name].replace(
+                            b'PROVIDE(map_VRAM = 0x80240000);\n', b''))
+                    else:
+                        self.assertEqual(after[name], before[name])
+                self.assertEqual(self.snapshot('pal' if region == 'us' else 'us'), other)
+                snapshot = self.snapshot(region)
+                path.write_text(path.read_text().replace('font_VRAM_END = .;',
+                                                       'font_VRAM_END = .;\n    . += 16;'))
+                result = self.cli('--region', region)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.snapshot(region), snapshot)
+
+    def test_global_follow_validation_on_all_platforms(self):
+        for region in ('us', 'pal'):
+            path = self.decomp / f'ver/{region}/papermario.ld'
+            original = path.read_text()
+            obj = f'ver/{region}/build/assets/{region}/font.c.o'
+            base = f'    .font 0x00000000 :\n    {{\n        {obj}(.text);\n    }}\n'
+            bss = f'    .font_bss (NOLOAD) : SUBALIGN(8)\n    {{\n        {obj}(.bss);\n    }}\n'
+            valid = original.replace(f'    .font 0x00000000 :\n        {obj}(.text);',
+                                     base + bss + '    . = ALIGN(., 16);\n    font_VRAM_END = .;')
+            valid = valid.replace('.map 0x80240000 :', '.map font_VRAM_END :')
+            self.assertNotEqual(valid, original)
+            variants = {'late duplicate owner': valid + base,
+                        'late BSS': valid.replace(bss, '') + bss,
+                        'duplicate BSS': valid + bss}
+            for platform in ('pc', 'handheld', 'miyoo'):
+                with self.subTest(region=region, platform=platform):
+                    path.write_text(original)
+                    result = self.cli(platform, '--region', region)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    before = self.generated(region)
+                    path.write_text(valid)
+                    result = self.cli(platform, '--region', region)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    after = self.generated(region)
+                    self.assertEqual(after['port_segtab.c'], before['port_segtab.c'])
+                    self.assertEqual(after['rom_syms.ld'], before['rom_syms.ld'].replace(
+                        b'PROVIDE(map_VRAM = 0x80240000);\n', b''))
+                    self.assertEqual(after[platform + '.ninja'], before[platform + '.ninja'])
+                    segments = json.loads(after['segments.json'])
+                    self.assertEqual([x['name'] for x in segments],
+                                     ['main', 'font', 'map', 'boot', 'messages'])
+                    self.assertEqual(segments[2]['objs'], [f'ver/{region}/build/src/world/map.c.o'])
+                    for label, invalid in variants.items():
+                        for existing in (True, False):
+                            with self.subTest(case=label, existing=existing):
+                                if existing:
+                                    path.write_text(valid)
+                                    self.assertEqual(self.cli(platform, '--region', region).returncode, 0)
+                                else:
+                                    # Only synthetic output files owned by this test.
+                                    destination = self.build / 'pal' if region == 'pal' else self.build
+                                    for filename in self.generated(region):
+                                        (destination / filename).unlink()
+                                snapshot = self.snapshot(region)
+                                other = self.snapshot('us' if region == 'pal' else 'pal')
+                                path.write_text(invalid)
+                                result = self.cli(platform, '--region', region)
+                                self.assertNotEqual(result.returncode, 0)
+                                self.assertIn('unproven predecessor VRAM end', result.stderr)
+                                self.assertEqual(self.snapshot(region), snapshot)
+                                self.assertEqual(self.snapshot('us' if region == 'pal' else 'pal'), other)
+                                if not existing:
+                                    self.assertEqual(self.generated(region), {})
+            path.write_text(original)
+
     def test_unsupported_symbolic_linker_address_rejected(self):
         path = self.decomp / 'ver/pal/papermario.ld'
         path.write_text(path.read_text().replace('.main 0x80025C00 :', '.main UNRESOLVED_VRAM :'))
@@ -728,6 +815,154 @@ class BuildGeneratorTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), us)
         self.assertEqual(list((self.build / 'pal').glob('.gen-build-*')), [])
 
+
+
+class LinkerFollowParserTests(unittest.TestCase):
+    """Author-created linker text only: no real split, ROM or asset inputs."""
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def block(self, name, address, region, bss=False):
+        obj = f'ver/{region}/build/src/{name}.c.o'
+        text = (f'    .{name} {address} : AT({name}_ROM_START) SUBALIGN(8)\n'
+                f'    {{\n        {obj}(.text);\n        . = ALIGN(., 16);\n    }}\n')
+        if bss:
+            text += (f'    {name}_bss_VRAM = ADDR(.{name}_bss);\n'
+                     f'    .{name}_bss (NOLOAD) : SUBALIGN(8)\n'
+                     f'    {{\n        {obj}(.bss);\n        . = ALIGN(., 16);\n    }}\n')
+        return (text + f'    __romPos += SIZEOF(.{name});\n'
+                '    __romPos = ALIGN(__romPos, 16);\n    . = ALIGN(., 16);\n'
+                f'    {name}_ROM_END = __romPos;\n    {name}_VRAM_END = .;\n')
+
+    def fixture(self, region, bss=False):
+        return (self.block('alpha', '0x80200000', region, bss) +
+                '    beta_ROM_START = __romPos;\n    beta_VRAM = ADDR(.beta);\n' +
+                self.block('beta', 'alpha_VRAM_END', region, bss))
+
+    def parse(self, text, region):
+        path = self.root / 'synthetic.ld'
+        path.write_text(text)
+        return gen_build.parse_ld(path, region)
+
+    def reject(self, transform):
+        for region in ('us', 'pal'):
+            with self.subTest(region=region):
+                with self.assertRaisesRegex(ValueError, 'unsupported linker section address'):
+                    self.parse(transform(self.fixture(region, True), region), region)
+
+    def test_valid_follow(self):
+        for region in ('us', 'pal'):
+            for bss in (False, True):
+                with self.subTest(region=region, bss=bss):
+                    segs = self.parse(self.fixture(region, bss), region)
+                    self.assertEqual([x['name'] for x in segs], ['alpha', 'beta'])
+                    self.assertEqual(segs[0]['vram'], 0x80200000)
+                    self.assertIsNone(segs[1]['vram'])
+                    self.assertEqual(segs[1]['vram_follow'],
+                                     {'segment': 'alpha', 'symbol': 'alpha_VRAM_END'})
+                    self.assertEqual(segs[1]['objs'], [f'ver/{region}/build/src/beta.c.o'])
+                    self.assertEqual(gen_build.seg_class(segs[1], region), 'follow')
+
+    def test_follow_chain(self):
+        for region in ('us', 'pal'):
+            segs = self.parse(self.fixture(region, True) +
+                              self.block('gamma', 'beta_VRAM_END', region, True), region)
+            self.assertEqual([s['name'] for s in segs], ['alpha', 'beta', 'gamma'])
+            self.assertEqual(segs[2]['vram_follow']['segment'], 'beta')
+            self.assertEqual(segs[2]['objs'], [f'ver/{region}/build/src/gamma.c.o'])
+
+    def test_unknown_symbol(self):
+        self.reject(lambda t, r: t.replace('.beta alpha_VRAM_END :', '.beta UNKNOWN :'))
+
+    def test_missing_definition(self):
+        self.reject(lambda t, r: t.replace('    alpha_VRAM_END = .;\n', ''))
+
+    def test_duplicate_definition(self):
+        self.reject(lambda t, r: t + '    alpha_VRAM_END = .;\n')
+
+    def test_duplicate_predecessor_section(self):
+        self.reject(lambda t, r: '    .alpha 0x80100000 :\n    {\n    }\n' + t)
+
+    def test_duplicate_predecessor_after_follower(self):
+        self.reject(lambda t, r: t + '    .alpha 0x80300000 :\n    {\n    }\n')
+
+    def test_bss_after_follower(self):
+        self.reject(lambda t, r: self.fixture(r) +
+                    '    .alpha_bss (NOLOAD) : SUBALIGN(8)\n    {\n    }\n')
+
+    def test_duplicate_predecessor_bss(self):
+        self.reject(lambda t, r: t +
+                    '    .alpha_bss (NOLOAD) : SUBALIGN(8)\n    {\n    }\n')
+
+    def test_duplicate_follower_after_relation(self):
+        self.reject(lambda t, r: t + '    .beta 0x80300000 :\n    {\n    }\n')
+
+    def test_predecessor_bss_with_conflicting_address(self):
+        self.reject(lambda t, r: t.replace('.alpha_bss (NOLOAD)', '.alpha_bss 0x80400000'))
+
+    def test_forward_end_definition(self):
+        self.reject(lambda t, r: t.replace('    alpha_VRAM_END = .;\n', '') +
+                    '    alpha_VRAM_END = .;\n')
+
+    def test_symbolic_first_segment(self):
+        self.reject(lambda t, r: t.replace('.alpha 0x80200000 :',
+                                           '.alpha alpha_VRAM_END :'))
+
+    def test_compound_redefinition(self):
+        self.reject(lambda t, r: t + '    alpha_VRAM_END += 16;\n')
+
+    def test_other_compound_redefinitions(self):
+        for operator in ('%=', '<<=', '>>=', '^=', '-='):
+            with self.subTest(operator=operator):
+                self.reject(lambda t, r: t + f'    alpha_VRAM_END {operator} 16;\n')
+
+    def test_multiline_redefinition(self):
+        self.reject(lambda t, r: t + '    alpha_VRAM_END\n        = .;\n')
+
+    def test_non_dot_definition(self):
+        self.reject(lambda t, r: t.replace('alpha_VRAM_END = .;', 'alpha_VRAM_END = 0x80200080;'))
+
+    def test_cyclic_alias(self):
+        self.reject(lambda t, r: t.replace('alpha_VRAM_END = .;',
+                    'alpha_VRAM_END = beta_VRAM_END;'))
+
+    def test_non_immediate_predecessor(self):
+        self.reject(lambda t, r: t.replace('    beta_ROM_START = __romPos;',
+                    self.block('middle', '0x80300000', r) + '    beta_ROM_START = __romPos;'))
+
+    def test_position_change_after_end(self):
+        self.reject(lambda t, r: t.replace('alpha_VRAM_END = .;',
+                                           'alpha_VRAM_END = .;\n    . += 16;'))
+
+    def test_alignment_after_end(self):
+        self.reject(lambda t, r: t.replace('alpha_VRAM_END = .;',
+                                           'alpha_VRAM_END = .;\n    . = ALIGN(., 16);'))
+
+    def test_end_before_bss(self):
+        self.reject(lambda t, r: t.replace('    alpha_VRAM_END = .;\n', '').replace(
+            '    alpha_bss_VRAM =', '    alpha_VRAM_END = .;\n    alpha_bss_VRAM ='))
+
+    def test_end_inside_body(self):
+        self.reject(lambda t, r: t.replace('    alpha_VRAM_END = .;\n', '').replace(
+            f'        ver/{r}/build/src/alpha.c.o(.bss);',
+            f'        ver/{r}/build/src/alpha.c.o(.bss);\n    alpha_VRAM_END = .;'))
+
+    def test_symbolic_arithmetic(self):
+        self.reject(lambda t, r: t.replace('.beta alpha_VRAM_END :',
+                                           '.beta alpha_VRAM_END + 16 :'))
+
+    def test_symbolic_function(self):
+        self.reject(lambda t, r: t.replace('.beta alpha_VRAM_END :',
+                                           '.beta ALIGN(alpha_VRAM_END, 16) :'))
+
+    def test_invalid_alignment(self):
+        self.reject(lambda t, r: t.replace('. = ALIGN(., 16);', '. = ALIGN(., 3);'))
+
+    def test_missing_body_close(self):
+        self.reject(lambda t, r: t.replace('    }\n', '', 1))
+
+    def test_unrelated_noload(self):
+        self.reject(lambda t, r: t.replace('.alpha_bss (NOLOAD)', '.foreign_bss (NOLOAD)'))
 
 
 if __name__ == '__main__':

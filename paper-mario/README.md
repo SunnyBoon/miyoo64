@@ -149,8 +149,20 @@ remain valid. Additional BSS-only native units would need an explicit review.
 It does not fall back to US inputs. Mixed regions, missing object rules, empty
 native unit lists, malformed effect headers and unsupported symbolic linker
 section addresses abort with an error. Numeric, omitted and NOLOAD section
-addresses are supported; arbitrary linker expressions are not evaluated here.
-The actual PAL split's linker output still needs validation once it is available.
+addresses remain supported. A symbolic `<predecessor>_VRAM_END` address is accepted
+only when its unique definition is the final location counter after the immediately
+preceding segment, including its optional BSS and final alignments. Section names
+for both participants and the predecessor BSS are checked across the entire script.
+An existing predecessor BSS must occur exactly once, immediately after its owner
+and before the final end definition; late or duplicate sections are rejected. The parser
+checks the pinned Splat section/trailer grammar and rejects later position changes,
+duplicate definitions, unknown symbols and arithmetic. It retains this proven
+relation internally as `vram_follow`; public segment metadata uses `vram: null`
+and class `follow`. No numeric VMA or VRAM_END is invented. ROM ranges and their
+start/end symbols still come from the region's segment table. Arbitrary linker
+expressions and object-dependent sizes are not evaluated here.
+The actual PAL linker script is available in the isolated working copy. A successful
+run through the corrected generator against that script is still unconfirmed.
 
 All PAL artifacts are isolated under `build/game/pal/`: the platform Ninja files,
 `pc_game.mk`/`handheld_game.mk`, `segments.json`, `port_effects.c`, `port_segtab.c`,
