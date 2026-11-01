@@ -153,8 +153,33 @@ image includes and `message_ids.h`/`ld_addrs.h`. The generator checks prerequisi
 file existence without reading generated binary data. It consumes
 `build/game/pal/rom_segments.json` from `rom_segments.py --region pal` and refuses
 a table without the four PAL language segments or native segment ranges.
+Duplicate PAL raw names are accepted only for an adjacent `ci8`/`palette` pair.
+The image's unique linker section and matching `.png.o`/`.pal.o` bin objects must
+prove the pairing. The complete logical `bin` edge must declare exactly the
+expected literal object and its single literal binary input. Extra outputs/inputs, implicit/order-only
+inputs and duplicate output aliases are rejected. Output lookup keys normalize
+components before matching known host/container roots; root matching uses whole
+components. Foreign absolute outputs and `..` steps crossing an identity root
+are rejected even if a later component would return inside. This is lexical alias
+indexing only: it does not resolve symlinks or rewrite build/publication paths.
+Only token-boundary `$` newline
+continuations and an optional single `version = pal` edge binding are supported.
+Other edge bindings, escapes and input variables are rejected. Escaped/variable
+build outputs and external `include`/`subninja` files prevent this bounded proof
+from excluding hidden output aliases and are therefore rejected too. This does
+not change the general Ninja parser or validate arbitrary rule commands. Its
+existing formatting restrictions still apply before the E2c proof.
+The palette identity comes from its actual linker section name,
+not an assumed `_pal` suffix. Both sections must match the pinned pure-data Splat
+grammar, define unique ROM start/end symbols and form an uninterrupted ROM-position
+chain. Binary file sizes (metadata only) must match each recorded range. Other
+ambiguities abort before publication. The internal table retains every entry and
+ROM boundary; the input JSON schema/content and `rom_segments.py` are unchanged.
+US generation keeps its existing behavior and reference outputs. This does not
+prove binary contents or game behavior; inputs must remain stable during generation.
+
 Required language/code ranges must have a known end, fit in the 32-bit ROM address
-space and contain ROM bytes. Duplicate PAL segment names are rejected. Zero-length
+space and contain ROM bytes. Unresolved duplicate PAL segment names are rejected. Zero-length
 native BSS ranges remain supported for the pinned units `heaps`, `heaps2`, `heaps3`,
 `heaps4`, `texture_memory` and `model_clear_render_tasks`: both the segment name
 and its source path must match the pinned BSS-only unit. A `type: bss` tag or a

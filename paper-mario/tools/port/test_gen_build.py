@@ -454,6 +454,354 @@ class BuildGeneratorTests(unittest.TestCase):
                             self.assertEqual(list(destination.glob('.gen-build-*')), [])
         ninja.write_text(original)
 
+    def add_synthetic_palette_pairs(self, count=1):
+        table_path = self.build / 'pal/rom_segments.json'
+        table = json.loads(table_path.read_text())
+        terminal = table.pop()
+        start = terminal['rom_start']
+        blocks, rules, pairs = [], [], []
+        for index in range(count):
+            raw, palette_name = f'graphic_{index}', f'colors_{index}'
+            entries = [{'name': raw, 'type': 'ci8', 'rom_start': start, 'rom_end': start + 16},
+                       {'name': raw, 'type': 'palette', 'rom_start': start + 16, 'rom_end': start + 24}]
+            table.extend(entries)
+            for name, extension, size in ((raw, 'png', 16), (palette_name, 'pal', 8)):
+                stem = f'ver/pal/build/assets/pal/synthetic/texture_{index}.{extension}'
+                self.write('refs/papermario/' + stem + '.bin', 'x' * size)
+                rules.append(f'build {stem}.o: bin {stem}.bin')
+                blocks.append(self.synthetic_data_section(name, stem + '.o'))
+            pairs.append((raw, palette_name, entries))
+            start += 24
+        table.append(dict(terminal, rom_start=start))
+        table_path.write_text(json.dumps(table))
+        ld = self.decomp / 'ver/pal/papermario.ld'
+        ld.write_text(ld.read_text() + '\n'.join(blocks))
+        ninja = self.decomp / 'build.ninja'
+        ninja.write_text(ninja.read_text() + '\n'.join(rules) + '\n')
+        return pairs
+
+    @staticmethod
+    def synthetic_data_section(name, obj):
+        return (f'    {name}_ROM_START = __romPos;\n'
+                f'    {name}_VRAM = ADDR(.{name});\n'
+                f'    .{name} : AT({name}_ROM_START) SUBALIGN(8)\n'
+                '    {\n        FILL(0x00000000);\n'
+                f'        {name}_DATA_START = .;\n        {obj}(.data);\n'
+                f'        {name}_DATA_END = .;\n'
+                f'        {name}_DATA_SIZE = ABSOLUTE({name}_DATA_END - {name}_DATA_START);\n'
+                '    }\n'
+                f'    __romPos += SIZEOF(.{name});\n'
+                f'    {name}_ROM_END = __romPos;\n    {name}_VRAM_END = .;\n')
+
+    def test_palette_identity_uses_proven_linker_names_on_all_platforms(self):
+        pairs = self.add_synthetic_palette_pairs(3)
+        table_path = self.build / 'pal/rom_segments.json'
+        raw_bytes = table_path.read_bytes()
+        original = json.loads(raw_bytes)
+        with patch.multiple(gen_build, ROOT=str(self.root), DECOMP=str(self.decomp)):
+            segs = gen_build.parse_ld(self.decomp / 'ver/pal/papermario.ld', 'pal')
+            resolved, inputs = gen_build.pal_rom_identities(original, segs, self.decomp / 'build.ninja')
+        self.assertEqual(len(resolved), len(original))
+        self.assertEqual(len(inputs), 6)
+        self.assertEqual([e['rom_start'] for e in resolved], [e['rom_start'] for e in original])
+        self.assertEqual([e['rom_end'] for e in resolved], [e['rom_end'] for e in original])
+        self.assertEqual([e['type'] for e in resolved], [e['type'] for e in original])
+        self.assertEqual(original, json.loads(raw_bytes))
+        self.assertEqual(self.cli('--region', 'us').returncode, 0)
+        us = self.snapshot('us')
+        for platform in ('pc', 'handheld', 'miyoo'):
+            result = self.cli(platform, '--region', 'pal')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            symbols = (self.build / 'pal/rom_syms.ld').read_text()
+            for raw, palette_name, entries in pairs:
+                for name, entry in zip((raw, palette_name), entries):
+                    for suffix, value in (('START', entry['rom_start']), ('END', entry['rom_end'])):
+                        self.assertEqual(symbols.count(f'PROVIDE({name}_ROM_{suffix} = 0x{value:08X});'), 1)
+                self.assertNotIn('"' + raw + '"', (self.build / 'pal/port_segtab.c').read_text())
+            for language in ('en', 'de', 'fr', 'es'):
+                self.assertIn(f'msg_pal_{language}_ROM_START', symbols)
+            self.assertEqual(self.snapshot('us'), us)
+            self.assertEqual(table_path.read_bytes(), raw_bytes)
+
+    def assert_palette_rejected(self, mutate):
+        self.add_synthetic_palette_pairs()
+        self.assertEqual(self.cli('--region', 'pal').returncode, 0)
+        self.assertEqual(self.cli('--region', 'us').returncode, 0)
+        us = self.snapshot('us')
+        mutate()
+        before = self.snapshot('pal')
+        for existing in (True, False):
+            if not existing:
+                for name in self.generated('pal'):
+                    (self.build / 'pal' / name).unlink()
+                before = self.snapshot('pal')
+            result = self.cli('--region', 'pal')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.snapshot('pal'), before)
+            self.assertEqual(self.snapshot('us'), us)
+            self.assertEqual(list((self.build / 'pal').glob('.gen-build-*')), [])
+
+    def change_palette_table(self, change):
+        path = self.build / 'pal/rom_segments.json'
+        table = json.loads(path.read_text())
+        change(table)
+        path.write_text(json.dumps(table))
+
+    def change_palette_ld(self, change):
+        path = self.decomp / 'ver/pal/papermario.ld'
+        path.write_text(change(path.read_text()))
+
+    def test_duplicate_code_type_is_not_a_palette_pair(self):
+        self.assert_palette_rejected(lambda: self.change_palette_table(lambda t: t[-2].update(type='code')))
+
+    def test_palette_pair_must_be_adjacent_in_rom_table(self):
+        self.assert_palette_rejected(lambda: self.change_palette_table(lambda t: t.insert(-2,
+            dict(name='gap', type='bin', rom_start=t[-2]['rom_start'], rom_end=t[-2]['rom_start']))))
+
+    def test_palette_range_must_match_bin_size(self):
+        self.assert_palette_rejected(lambda: (self.decomp / 'ver/pal/build/assets/pal/synthetic/texture_0.pal.bin').write_bytes(b'bad'))
+
+    def test_image_range_must_match_bin_size(self):
+        self.assert_palette_rejected(lambda: (self.decomp / 'ver/pal/build/assets/pal/synthetic/texture_0.png.bin').write_bytes(b'bad'))
+
+    def test_palette_range_must_have_known_end(self):
+        self.assert_palette_rejected(lambda: self.change_palette_table(lambda t: t[-2].update(rom_end=None)))
+
+    def test_palette_range_start_must_match_previous_end(self):
+        self.assert_palette_rejected(lambda: self.change_palette_table(lambda t: t[-2].update(rom_start=t[-2]['rom_start'] + 1)))
+
+    def test_missing_palette_linker_mapping_is_rejected(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t.replace('texture_0.pal.o', 'unrelated.pal.o')))
+
+    def test_multiple_palette_linker_mappings_are_rejected(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t +
+            self.synthetic_data_section('other_colors', 'ver/pal/build/assets/pal/synthetic/texture_0.pal.o')))
+
+    def test_duplicate_image_linker_section_is_rejected(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t +
+            self.synthetic_data_section('graphic_0', 'ver/pal/build/assets/pal/synthetic/texture_0.png.o')))
+
+    def test_palette_identity_cannot_collide_with_existing_name(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t.replace('colors_0', 'map')))
+
+    def test_duplicate_rom_symbol_definition_is_rejected(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t + '    colors_0_ROM_START = __romPos;\n'))
+
+    def test_palette_lma_must_use_its_own_start_symbol(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t.replace(
+            'AT(colors_0_ROM_START)', 'AT(graphic_0_ROM_START)')))
+
+    def test_palette_lma_chain_must_be_uninterrupted(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t.replace(
+            '    colors_0_ROM_START =', '    __romPos += 16;\n    colors_0_ROM_START =')))
+
+    def test_palette_bin_rule_must_match_linker_object(self):
+        def mutate():
+            path = self.decomp / 'build.ninja'
+            path.write_text(path.read_text().replace('pal.o: bin ver/pal/build/assets/pal/synthetic/texture_0.pal.bin',
+                                                   'pal.o: bin ver/pal/build/assets/pal/synthetic/other.bin'))
+        self.assert_palette_rejected(mutate)
+
+    def test_palette_object_shared_with_mixed_section_is_rejected(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t +
+            '    .extra :\n        ver/pal/build/assets/pal/synthetic/texture_0.pal.o(.data);\n'
+            '        ver/pal/build/src/main.c.o(.data);\n'))
+
+    def test_image_object_shared_with_another_section_is_rejected(self):
+        self.assert_palette_rejected(lambda: self.change_palette_ld(lambda t: t +
+            '    .extra :\n        ver/pal/build/assets/pal/synthetic/texture_0.png.o(.data);\n'))
+
+    def test_duplicate_palette_object_build_rule_is_rejected(self):
+        def mutate():
+            path = self.decomp / 'build.ninja'
+            path.write_text(path.read_text() +
+                'build ver/pal/build/assets/pal/synthetic/texture_0.pal.o: bin '
+                'ver/pal/build/assets/pal/synthetic/texture_0.pal.bin\n')
+        self.assert_palette_rejected(mutate)
+
+    def test_palette_binary_must_be_regular_file(self):
+        def mutate():
+            path = self.decomp / 'ver/pal/build/assets/pal/synthetic/texture_0.pal.bin'
+            path.unlink()
+            path.mkdir()
+        self.assert_palette_rejected(mutate)
+
+    def test_palette_binary_cannot_alias_us_input(self):
+        def mutate():
+            source = self.write('refs/papermario/ver/us/build/palette.bin', 'x' * 8)
+            path = self.decomp / 'ver/pal/build/assets/pal/synthetic/texture_0.pal.bin'
+            path.unlink()
+            path.symlink_to(source)
+        self.assert_palette_rejected(mutate)
+
+    def assert_bin_edge_rejected(self, transform, extensions=('png', 'pal'), expected_error=None):
+        for extension in extensions:
+            with self.subTest(extension=extension):
+                self.make_fixture()
+                def mutate():
+                    path = self.decomp / 'build.ninja'
+                    original = path.read_text()
+                    obj = f'ver/pal/build/assets/pal/synthetic/texture_0.{extension}.o'
+                    source = obj[:-2] + '.bin'
+                    old = f'build {obj}: bin {source}'
+                    self.assertEqual(original.count(old), 1)
+                    path.write_text(original.replace(old, transform(old, obj, source)))
+                    # Exercise E2c itself, even if the general parser would also
+                    # reject the malformed graph before reaching preflight.
+                    proof_error = io.StringIO()
+                    with patch.multiple(gen_build, ROOT=str(self.root), DECOMP=str(self.decomp)), \
+                            redirect_stderr(proof_error):
+                        segs = gen_build.parse_ld(self.decomp / 'ver/pal/papermario.ld', 'pal')
+                        table = json.loads((self.build / 'pal/rom_segments.json').read_text())
+                        with self.assertRaises((SystemExit, ValueError)) as stopped:
+                            gen_build.pal_rom_identities(table, segs, path)
+                    if expected_error is not None:
+                        self.assertIn(expected_error, proof_error.getvalue() + str(stopped.exception))
+                self.assert_palette_rejected(mutate)
+
+    def test_bin_edge_rejects_extra_image_input(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: line + ' ' + src, ('png',))
+
+    def test_bin_edge_rejects_extra_palette_input(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: line + ' ' + src, ('pal',))
+
+    def test_bin_edge_rejects_multiple_additional_inputs(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: line + ' ' + src + ' other.bin')
+
+    def test_bin_edge_rejects_extra_input_on_continuation(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: line + ' $\n    ' + src)
+
+    def test_bin_edge_rejects_missing_input(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: f'build {obj}: bin')
+
+    def test_bin_edge_rejects_wrong_rule(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: f'build {obj}: phony {src}')
+
+    def test_bin_edge_rejects_implicit_and_order_only_inputs(self):
+        for marker in ('|', '||', '|@'):
+            with self.subTest(marker=marker):
+                self.assert_bin_edge_rejected(lambda line, obj, src: line + f' {marker} {src}')
+
+    def test_bin_edge_rejects_variable_and_escaped_inputs(self):
+        for value in ('$source', '${source}', '$$source', 'escaped$ input.bin', 'escaped$:input.bin'):
+            with self.subTest(value=value):
+                self.assert_bin_edge_rejected(lambda line, obj, src: f'build {obj}: bin {value}')
+
+    def test_bin_edge_rejects_duplicate_output_aliases(self):
+        for prefix in ('./', '/work/refs/papermario/'):
+            with self.subTest(prefix=prefix):
+                self.assert_bin_edge_rejected(lambda line, obj, src:
+                    line + f'\nbuild {prefix}{obj} : bin {src}')
+
+    def test_bin_edge_rejects_normalized_absolute_root_aliases(self):
+        for root in (gen_build.C_DECOMP, str(self.decomp)):
+            forms = (root, f'{os.path.dirname(root)}/./{os.path.basename(root)}',
+                     root + '/scratch/..',
+                     f'{os.path.dirname(root)}/scratch/../{os.path.basename(root)}')
+            for alias in forms:
+                with self.subTest(alias=alias):
+                    self.assert_bin_edge_rejected(lambda line, obj, src:
+                        line + f'\nbuild {alias}/{obj}: bin {src}',
+                        expected_error='CI8/palette identity not proven')
+
+    def test_bin_edge_rejects_foreign_absolute_output_roots(self):
+        for root in (gen_build.C_DECOMP + '-other', str(self.decomp) + '-other', '/foreign'):
+            with self.subTest(root=root):
+                self.assert_bin_edge_rejected(lambda line, obj, src:
+                    line + f'\nbuild {root}/{obj}: bin {src}',
+                    expected_error='foreign absolute Ninja output')
+
+    def test_bin_edge_rejects_output_root_escape_even_after_return(self):
+        for root in (gen_build.C_DECOMP, str(self.decomp)):
+            with self.subTest(root=root):
+                self.assert_bin_edge_rejected(lambda line, obj, src:
+                    line + f'\nbuild {root}/../{os.path.basename(root)}/{obj}: bin {src}',
+                    expected_error='Ninja output escapes its identity root')
+        self.assert_bin_edge_rejected(lambda line, obj, src:
+            line + f'\nbuild ../{obj}: bin {src}',
+            expected_error='Ninja output escapes its identity root')
+
+    def test_bin_edge_rejects_multiple_mixed_output_aliases(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src:
+            line + f'\nbuild ./ver/pal/build/assets/pal/synthetic/{Path(obj).name}: bin {src}' +
+            f'\nbuild /work/refs/./papermario/{obj}: bin {src}' +
+            f'\nbuild {self.decomp}/scratch/../{obj}: bin {src}',
+            expected_error='CI8/palette identity not proven')
+
+    def test_identity_output_keys_share_component_bounded_roots(self):
+        obj = 'ver/pal/build/assets/pal/synthetic/image.pal.o'
+        with patch.object(gen_build, 'DECOMP', str(self.decomp)):
+            aliases = [obj, './' + obj, 'ver/pal/unused/../build/assets/pal/synthetic/image.pal.o']
+            for root in (gen_build.C_DECOMP, str(self.decomp)):
+                aliases.extend((root + '/' + obj,
+                    f'{os.path.dirname(root)}/./{os.path.basename(root)}/{obj}',
+                    root + '/scratch/../' + obj,
+                    f'{os.path.dirname(root)}/scratch/../{os.path.basename(root)}/{obj}',
+                    '//' + root + '/' + obj))
+            for alias in aliases:
+                with self.subTest(alias=alias):
+                    self.assertEqual(gen_build.identity_ninja_output_key(alias), obj)
+
+    def test_identity_output_keys_reject_root_escapes_and_prefix_confusion(self):
+        with patch.object(gen_build, 'DECOMP', str(self.decomp)):
+            for root in (gen_build.C_DECOMP, str(self.decomp)):
+                for alias in (root + '-other/file.o', root + '/../papermario/file.o',
+                              root + '/../../outside/file.o', root):
+                    with self.subTest(alias=alias), self.assertRaises(ValueError):
+                        gen_build.identity_ninja_output_key(alias)
+            for alias in ('../file.o', 'a/../../file.o', '/foreign/file.o'):
+                with self.subTest(alias=alias), self.assertRaises(ValueError):
+                    gen_build.identity_ninja_output_key(alias)
+
+    def test_bin_edge_rejects_additional_outputs(self):
+        for implicit in ('', '| '):
+            with self.subTest(implicit=implicit):
+                self.assert_bin_edge_rejected(lambda line, obj, src:
+                    f'build {obj} {implicit}extra.o: bin {src}')
+
+    def test_bin_edge_rejects_escaped_or_variable_output_definitions(self):
+        for output in ('$output', '${output}', 'escaped$ output.o', 'escaped$:output.o'):
+            with self.subTest(output=output):
+                self.assert_bin_edge_rejected(lambda line, obj, src:
+                    line + f'\nbuild {output}: bin {src}')
+
+    def test_bin_edge_rejects_unsupported_edge_bindings(self):
+        for binding in ('dyndep = other.dd', 'command = other', 'version = us',
+                        'version = $region', 'version = pal\n  version = pal'):
+            with self.subTest(binding=binding):
+                self.assert_bin_edge_rejected(lambda line, obj, src: line + '\n  ' + binding)
+
+    def test_bin_edge_rejects_mid_token_continuation(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src:
+            f'build {obj}: bin {src[:-4]}$\n    .bin')
+
+    def test_bin_edge_rejects_unfinished_continuation(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: line + ' $')
+
+    def test_bin_edge_rejects_escaped_dollar_before_next_definition(self):
+        self.assert_bin_edge_rejected(lambda line, obj, src: line + '$$\n' + line)
+
+    def test_bin_edge_rejects_external_ninja_definitions(self):
+        for directive in ('include', 'subninja'):
+            with self.subTest(directive=directive):
+                self.assert_bin_edge_rejected(lambda line, obj, src: line + f'\n{directive} other.ninja')
+
+    def test_bin_edge_accepts_token_boundary_continuations_and_pal_binding(self):
+        self.add_synthetic_palette_pairs()
+        self.assertEqual(self.cli('--region', 'pal').returncode, 0)
+        before = self.snapshot('pal')
+        path = self.decomp / 'build.ninja'
+        text = path.read_text()
+        for extension in ('png', 'pal'):
+            obj = f'ver/pal/build/assets/pal/synthetic/texture_0.{extension}.o'
+            src = obj[:-2] + '.bin'
+            text = text.replace(f'build {obj}: bin {src}',
+                                f'build {obj}: $\n    bin $\n    {src}\n  version = pal')
+        path.write_text(text)
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.snapshot('pal'), before)
+
     def test_global_follow_validation_on_all_platforms(self):
         for region in ('us', 'pal'):
             path = self.decomp / f'ver/{region}/papermario.ld'

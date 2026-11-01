@@ -439,6 +439,179 @@ def local_input(path):
     return os.path.join(DECOMP, normalized_input(path))
 
 
+def identity_ninja_output_key(output):
+    """Lexical lookup key only; do not resolve symlinks or rewrite build paths."""
+    absolute = os.path.isabs(output)
+    roots = {Path(os.path.normpath(root)).parts[1:] for root in (C_DECOMP, DECOMP)}
+    parts = []
+    for part in output.split('/'):
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if not parts or (absolute and tuple(parts) in roots):
+                raise ValueError(f'Ninja output escapes its identity root: {output}')
+            parts.pop()
+        else:
+            parts.append(part)
+    if absolute:
+        matches = [root for root in roots if tuple(parts[:len(root)]) == root]
+        if not matches:
+            raise ValueError(f'foreign absolute Ninja output in PAL identity proof: {output}')
+        parts = parts[len(max(matches, key=len)):]
+    if not parts:
+        raise ValueError(f'Ninja output names its identity root: {output}')
+    return '/'.join(parts)
+
+
+def identity_ninja_edges(path):
+    """Index literal build outputs for the limited PAL identity proof only.
+
+    Token-boundary continuations are supported. Escaped/variable outputs cannot
+    be ruled out as aliases, so the proof rejects them instead of guessing.
+    Other rules' commands/variables are not interpreted or modified.
+    """
+    edges, pending, current = {}, None, None
+    with open(path) as stream:
+        for raw in stream:
+            line = raw.rstrip('\n')
+            if pending is not None:
+                line = pending + line.lstrip(' \t')
+            elif not line.strip() or line.lstrip().startswith('#'):
+                continue
+            elif line.startswith((' ', '\t')):
+                if current is not None:
+                    current[1].append(line.strip())
+                continue
+            elif not re.match(r'^build[ \t]', line):
+                if re.match(r'^(?:include|subninja)[ \t]', line):
+                    raise ValueError(f'unsupported Ninja include in PAL identity proof: {line}')
+                current = None
+                continue
+            trailing = len(line) - len(line.rstrip('$'))
+            if trailing % 2:
+                if len(line) < 2 or line[-2] not in ' \t':
+                    raise ValueError(f'unsupported Ninja continuation in PAL identity proof: {line}')
+                pending = line[:-1]
+                continue
+            pending = None
+            match = re.fullmatch(r'build[ \t]+([^:]+):[ \t]*(.*)', line)
+            if not match:
+                raise ValueError(f'unsupported Ninja build syntax in PAL identity proof: {line}')
+            outputs = match[1].split()
+            if not outputs or any(token != '|' and not re.fullmatch(r'[A-Za-z0-9_./+\-]+', token)
+                                  for token in outputs):
+                raise ValueError(f'unsupported Ninja output syntax in PAL identity proof: {line}')
+            current = [line, []]
+            for output in outputs:
+                if output == '|':
+                    continue
+                # Lookup only: aliases are counted, never accepted as canonical
+                # output spellings or used as filesystem publication paths.
+                key = identity_ninja_output_key(output)
+                edges.setdefault(key, []).append(current)
+    if pending is not None:
+        raise ValueError('incomplete Ninja continuation in PAL identity proof')
+    return edges
+
+
+def pal_rom_identities(romsegs, segs, ninja):
+    """Resolve only proven adjacent CI8/palette aliases; never change raw JSON.
+
+    The pinned Splat data-section grammar and bin rules establish the identities.
+    stat sizes check ROM lengths without reading extracted binary contents.
+    """
+    groups = {}
+    for index, entry in enumerate(romsegs):
+        if entry['name'] is not None:
+            groups.setdefault(entry['name'], []).append(index)
+    result = [dict(entry) for entry in romsegs]
+    inputs = []
+    edges = identity_ninja_edges(ninja) if any(len(g) > 1 for g in groups.values()) else {}
+    text = ''.join(ninja_lines(os.path.join(DECOMP, 'ver/pal/papermario.ld')))
+    for raw, indices in groups.items():
+        if len(indices) == 1:
+            continue
+
+        def fail():
+            die(f'ambiguous PAL ROM segment name: {raw}; CI8/palette identity not proven')
+
+        if len(indices) != 2 or indices[1] != indices[0] + 1:
+            fail()
+        image, palette = (romsegs[i] for i in indices)
+        if image['type'] != 'ci8' or palette['type'] != 'palette':
+            fail()
+        if any(entry['rom_end'] is None or not 0 <= entry['rom_start'] < entry['rom_end'] <= 0xFFFFFFFF
+               for entry in (image, palette)):
+            fail()
+        if image['rom_end'] != palette['rom_start']:
+            fail()
+        matches = [s for s in segs if s['name'] == raw]
+        if len(matches) != 1 or len(matches[0]['objs']) != 1:
+            fail()
+        image_obj = matches[0]['objs'][0]
+        prefix = 'ver/pal/build/assets/pal/'
+        if not image_obj.startswith(prefix) or not image_obj.endswith('.png.o'):
+            fail()
+        if sum(image_obj in s['objs'] for s in segs) != 1:
+            fail()
+        palette_obj = image_obj[:-6] + '.pal.o'
+        candidates = [s for s in segs if palette_obj in s['objs']]
+        if len(candidates) != 1 or candidates[0]['objs'] != [palette_obj]:
+            fail()
+        palette_name = candidates[0]['name']
+        if palette_name == raw or palette_name in groups:
+            fail()
+        if sum(s['name'] == palette_name for s in segs) != 1:
+            fail()
+        blocks = []
+        for name, obj, entry in ((raw, image_obj, image), (palette_name, palette_obj, palette)):
+            # One data object, no BSS, extra padding, expressions or LMA changes.
+            block = (f'    {name}_ROM_START = __romPos;\n'
+                     f'    {name}_VRAM = ADDR(.{name});\n'
+                     f'    .{name} : AT({name}_ROM_START) SUBALIGN(8)\n'
+                     '    {\n        FILL(0x00000000);\n'
+                     f'        {name}_DATA_START = .;\n        {obj}(.data);\n'
+                     f'        {name}_DATA_END = .;\n'
+                     f'        {name}_DATA_SIZE = ABSOLUTE({name}_DATA_END - {name}_DATA_START);\n'
+                     '    }\n'
+                     f'    __romPos += SIZEOF(.{name});\n'
+                     f'    {name}_ROM_END = __romPos;\n    {name}_VRAM_END = .;\n')
+            if text.count(block) != 1 or re.search(r'^    \.' + re.escape(name) + r'_bss\b', text, re.M):
+                fail()
+            for suffix in ('ROM_START', 'ROM_END'):
+                assignment = r'\b' + re.escape(name + '_' + suffix) + r'\s*(?:(?:<<|>>|[+*/%&|^\-])?=)'
+                if len(re.findall(assignment, text)) != 1:
+                    fail()
+            expected = obj[:-2] + '.bin'
+            definitions = edges.get(obj, [])
+            if len(definitions) != 1:
+                fail()
+            line, bindings = definitions[0]
+            complete = (r'build[ \t]+' + re.escape(obj) + r'[ \t]*:[ \t]+bin[ \t]+' +
+                        re.escape(expected) + r'[ \t]*')
+            if not re.fullmatch(complete, line):
+                fail()
+            if len(bindings) > 1 or any(not re.fullmatch(r'version[ \t]*=[ \t]*pal', b) for b in bindings):
+                fail()
+            local = local_input(expected)
+            actual = str(resolved_path(Path(local)).relative_to(resolved_path(Path(DECOMP))))
+            if re.search(r'\b(?:ver|assets)/us/', actual):
+                fail()
+            metadata = os.stat(local)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != entry['rom_end'] - entry['rom_start']:
+                fail()
+            inputs.append(Path(local))
+            blocks.append(block)
+        # Adjacent complete blocks prove one uninterrupted __romPos chain.
+        if blocks[0] + '\n' + blocks[1] not in text:
+            fail()
+        result[indices[1]]['name'] = palette_name
+    names = [entry['name'] for entry in result if entry['name'] is not None]
+    if len(names) != len(set(names)):
+        die('ambiguous PAL ROM segment name after identity resolution')
+    return result, inputs
+
+
 def preflight(paths, segs, units, ninja, plat):
     """Check prerequisites without opening any ROM or extracted binary data."""
     region = paths.region
@@ -508,6 +681,9 @@ def preflight(paths, segs, units, ninja, plat):
         next_start = romsegs[index + 1].get('rom_start') if index + 1 < len(romsegs) and isinstance(romsegs[index + 1], dict) else None
         if end != next_start:
             die(f'inconsistent ROM segment end at {index}')
+    identity_inputs = []
+    if region == 'pal':
+        romsegs, identity_inputs = pal_rom_identities(romsegs, segs, ninja)
     native = {segment for segment, obj, info in units}
     names = {entry['name'] for entry in romsegs}
     if region == 'pal':
@@ -536,6 +712,7 @@ def preflight(paths, segs, units, ninja, plat):
             if end is None or max(start, end) > 0xFFFFFFFF or (end == start and not bss_only):
                 die(f'incomplete or empty required PAL ROM range: {name}')
     inputs = [Path(local_input(name)) for name in required]
+    inputs += identity_inputs
     inputs += [Path(name) for name in local_sources]
     inputs += [Path(DECOMP) / 'ver' / region / 'papermario.ld', Path(ninja), Path(filename)]
     return romsegs, inputs
