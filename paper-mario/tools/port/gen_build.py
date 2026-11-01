@@ -256,6 +256,123 @@ def seg_class(seg, region='us'):
         return 'effect'
     return (WINDOWS if region == 'us' else {}).get(v, 'fixed')
 
+def pal_splat_code_facts(path):
+    """Read only direct, scalar fields of top-level PAL Splat segments.
+
+    This is deliberately a narrow, fail-closed reader, not a YAML parser. It
+    ignores nested subsegment scalars and accepts only unsigned numeric start/
+    VRAM fields. The ROM is never consulted.
+    """
+    facts = {}
+    source = Path(path).read_text(encoding='utf-8')
+    # JSON is a YAML subset. The existing synthetic rom_segments integration
+    # fixture writes this representation; accept it without a YAML dependency.
+    # Read only direct top-level segment scalars, as for block-style Splat.
+    if source.lstrip().startswith('{'):
+        try:
+            document = json.loads(source)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f'invalid PAL Splat JSON: {exc}') from exc
+        if not isinstance(document, dict) or not isinstance(document.get('segments'), list):
+            raise ValueError('PAL Splat lacks top-level segments list')
+        for segment in document['segments']:
+            if not isinstance(segment, dict):
+                raise ValueError('invalid PAL Splat JSON segment')
+            if segment.get('type') != 'code':
+                continue
+            name = segment.get('name')
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_]+', name):
+                continue
+            if name in facts:
+                raise ValueError(f'ambiguous PAL Splat code segment: {name}')
+            children = segment.get('subsegments', [])
+            if not isinstance(children, list):
+                raise ValueError(f'invalid PAL Splat subsegments for {name}')
+            fact = {'name': name, 'type': 'code',
+                    'has_data': any(isinstance(child, dict) and child.get('type') == '.data'
+                                    for child in children)}
+            for key in ('start', 'vram'):
+                value = segment.get(key)
+                if type(value) is int and 0 <= value <= 0xFFFFFFFF:
+                    fact[key] = value
+            follows = segment.get('follows_vram')
+            if isinstance(follows, str):
+                fact['follows_vram'] = follows
+            facts[name] = fact
+        return facts
+
+    in_segments = False
+    item_indent = None
+    current = None
+
+    def finish():
+        if current is None or current.get('type') != 'code':
+            return
+        name = current.get('name')
+        if not name or not re.fullmatch(r'[A-Za-z0-9_]+', name):
+            return
+        if name in facts:
+            raise ValueError(f'ambiguous PAL Splat code segment: {name}')
+        facts[name] = current.copy()
+
+    for raw in source.splitlines():
+        if not in_segments:
+            if re.fullmatch(r'segments:\s*(?:#.*)?', raw):
+                in_segments = True
+            continue
+        if raw and not raw[0].isspace() and not raw.lstrip().startswith('#'):
+            break
+        match = re.match(r'^( *)(- )(.+)$', raw)
+        if match and (item_indent is None or len(match[1]) < item_indent):
+            item_indent = len(match[1])
+        if match and len(match[1]) == item_indent:
+            finish()
+            current = {'has_data': False}
+            field = match[3]
+        elif current is not None and re.match(r'^ {' + str(item_indent + 2) + r'}\S', raw):
+            field = raw.strip()
+        else:
+            field = None
+        if current is None:
+            continue
+        # Splat permits both a one-line `- type: .data` child and a
+        # mapping child with `- start: ...` followed by `type: .data`.
+        # Only nested types count: top-level segment metadata stays separate.
+        if (len(raw) - len(raw.lstrip()) > item_indent and
+                re.fullmatch(r'\s*(?:-\s*)?type:\s*\.data\s*(?:#.*)?', raw)):
+            current['has_data'] = True
+        if field is None:
+            continue
+        scalar = re.fullmatch(r'(name|type|start|vram|follows_vram):\s*([^#\s]+)\s*(?:#.*)?', field)
+        if not scalar:
+            continue
+        key, value = scalar.groups()
+        if key in ('vram', 'start'):
+            try:
+                current[key] = int(value, 0)
+            except ValueError:
+                pass
+        else:
+            current[key] = value
+    if not in_segments:
+        raise ValueError('PAL Splat lacks top-level segments list')
+    finish()
+    return facts
+
+
+def pal_linker_prefixes(romsegs, segs):
+    """Normalize only linker identifiers; never rename a ROM segment."""
+    original = {name for name in
+                ([r['name'] for r in romsegs if r['name']] + [s['name'] for s in segs])}
+    names = {}
+    for name in sorted(original):
+        prefix = 'seg_' + name if name[0].isdigit() else name
+        if prefix in names and names[prefix] != name:
+            raise ValueError(f'PAL linker symbol collision: {names[prefix]} and {name}')
+        names[prefix] = name
+    return {name: ('seg_' + name if name[0].isdigit() else name) for name in original}
+
+
 def write_port_effects(out_dir, region='us'):
     """build/game/port_effects.c: the fx_* entry points. On the N64 each is a stub (asm/effects/*.s) that loads the
     effect (load_effect, TLB + DMA) and jumps to its main function through gEffectTable; the port calls it.
@@ -621,6 +738,8 @@ def preflight(paths, segs, units, ninja, plat):
                 f'ver/{region}/build/include/ld_addrs.h',
                 f'ver/{region}/build/include/message_ids.h',
                 f'assets/{region}/effects/effect_macros.h', f'assets/{region}/effects/effect_defs.h']
+    if region == 'pal':
+        required.append('ver/pal/splat.yaml')
     for segment, obj, info in units:
         if not obj.startswith(paths.prefix) or '..' in obj.split('/'):
             die(f'invalid {region} object path: {obj}')
@@ -1000,6 +1119,16 @@ def generate(plat, region='us'):
             for r in code:
                 f.write(f'    {{ 0x{r["rom_start"]:08X}, 0x{r["rom_end"]:08X}, "{r["name"]}" }},\n')
             f.write('};\n' f'const int port_code_segs_n = {len(code)};\n')
+        # PAL's explicitly declared Splat addresses can backfill provably
+        # followed VRAMs. Original segment names (JSON, DMA tables) stay intact.
+        pal_facts = (pal_splat_code_facts(os.path.join(DECOMP, 'ver/pal/splat.yaml'))
+                     if region == 'pal' else {})
+        prefixes = pal_linker_prefixes(romsegs, segs) if region == 'pal' else {}
+        declared = (set(re.findall(r'\bextern\s+Addr\s+([A-Za-z_][A-Za-z0-9_]*)\s*;',
+                                   Path(DECOMP, 'ver/pal/build/include/ld_addrs.h').read_text()))
+                    if region == 'pal' else set())
+        rom_by_name = {r['name']: r for r in romsegs if r['name']}
+        seg_by_name = {sg['name']: sg for sg in segs}
         # Every segment's ROM range (and a VRAM where the decomp fixes one), for the code that names them (ld_addrs.h).
         with open(os.path.join(out_dir, 'rom_syms.ld'), 'w') as f:
             f.write('/* generated by tools/port/gen_build.py: the ROM ranges of the decomp segments and their fixed VRAM addresses */\n')
@@ -1009,15 +1138,42 @@ def generate(plat, region='us'):
             for r in romsegs:
                 if not r['name'] or r['rom_end'] is None:
                     continue
+                symbol = prefixes.get(r['name'], r['name'])
                 if r['name'] in at_zero:
-                    f.write(f'PROVIDE({r["name"]}_ROM_START = 0);\n')
-                    f.write(f'PROVIDE({r["name"]}_ROM_END = 0x{r["rom_end"] - r["rom_start"]:08X});\n')
+                    f.write(f'PROVIDE({symbol}_ROM_START = 0);\n')
+                    f.write(f'PROVIDE({symbol}_ROM_END = 0x{r["rom_end"] - r["rom_start"]:08X});\n')
+                    # An explicitly data-bearing, zero-based native segment can
+                    # use its full ROM span as an allocation size. Only emit an
+                    # identifier that PMRET actually declares.
+                    fact = pal_facts.get(r['name'], {})
+                    if (region == 'pal' and fact.get('has_data') and
+                            fact.get('vram') == 0 and fact.get('start') == r['rom_start'] and
+                            f'{symbol}_DATA_SIZE' in declared):
+                        f.write(f'PROVIDE({symbol}_DATA_SIZE = 0x{r["rom_end"] - r["rom_start"]:08X});\n')
                     continue
-                f.write(f'PROVIDE({r["name"]}_ROM_START = 0x{r["rom_start"]:08X});\n')
-                f.write(f'PROVIDE({r["name"]}_ROM_END = 0x{r["rom_end"]:08X});\n')
+                f.write(f'PROVIDE({symbol}_ROM_START = 0x{r["rom_start"]:08X});\n')
+                f.write(f'PROVIDE({symbol}_ROM_END = 0x{r["rom_end"]:08X});\n')
             for sg in segs:
+                symbol = prefixes.get(sg['name'], sg['name'])
                 if sg['vram'] is not None:
-                    f.write(f'PROVIDE({sg["name"]}_VRAM = 0x{sg["vram"]:08X});\n')
+                    f.write(f'PROVIDE({symbol}_VRAM = 0x{sg["vram"]:08X});\n')
+                    continue
+                if region != 'pal' or 'vram_follow' not in sg or f'{symbol}_VRAM' not in declared:
+                    continue
+                fact = pal_facts.get(sg['name'], {})
+                previous = sg['vram_follow']['segment']
+                pred = pal_facts.get(previous, {})
+                rom = rom_by_name.get(sg['name'], {})
+                pred_rom = rom_by_name.get(previous, {})
+                # The Splat scalar must explicitly specify this VRAM and the
+                # same proven predecessor as parse_ld; never infer from offsets.
+                if (fact.get('type') == 'code' and fact.get('follows_vram') == previous and
+                        type(fact.get('vram')) is int and 0 <= fact['vram'] <= 0xFFFFFFFF and
+                        fact.get('start') == rom.get('rom_start') and
+                        pred.get('start') == pred_rom.get('rom_start') and
+                        type(pred.get('vram')) is int and
+                        seg_by_name.get(previous, {}).get('vram') == pred['vram']):
+                    f.write(f'PROVIDE({symbol}_VRAM = 0x{fact["vram"]:08X});\n')
             f.write('PROVIDE(heap_battleHead = gFrameBuf2);\nPROVIDE(gBackgroundImage = D_80200000);\n')
             # the selected region's fixed symbols (ver/<region>/undefined_syms.txt): the anti-piracy "obfuscated_" pointers keep their
             # arithmetic; hardware registers and the dead maps' pointers are not needed
@@ -1027,7 +1183,17 @@ def generate(plat, region='us'):
                     f.write(f'PROVIDE({m.group(1)} = {m.group(2).strip()});\n')
             # linker-script symbols with no native meaning yet: the overlays' section bounds (nuPiReadRomOverlay clears
             # nothing natively) and the N64 image bounds
-            for ov in ('pause', 'filemenu'):
+            overlays = ['pause', 'filemenu']
+            if region == 'pal':
+                # Image-only PAL pause overlays share a VMA window. N64 section
+                # clear bounds have no native meaning (nuPiReadRomOverlay).
+                for name, fact in sorted(pal_facts.items()):
+                    if (re.fullmatch(r'pause_gfx_[a-z]{2}', name) and
+                            fact.get('has_data') and type(fact.get('vram')) is int and
+                            name in seg_by_name and seg_by_name[name]['vram'] == fact['vram'] and
+                            fact.get('start') == rom_by_name.get(name, {}).get('rom_start')):
+                        overlays.append(name)
+            for ov in overlays:
                 for k in ('TEXT_START', 'TEXT_END', 'DATA_START', 'RODATA_END', 'BSS_START', 'BSS_END'):
                     f.write(f'PROVIDE({ov}_{k} = 0);\n')
             for sym in ('_fbss', '_ftext', '__assets_start', '__assets_end', 'world_action_CLASS_VRAM'):

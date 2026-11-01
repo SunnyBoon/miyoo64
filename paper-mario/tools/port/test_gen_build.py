@@ -92,6 +92,13 @@ class BuildGeneratorTests(unittest.TestCase):
                 self.write(f'refs/papermario/ver/{region}/build/include/{header}', '/* synthetic header */\n')
             ninja.extend([f'build generated_code_{region}: phony ver/{region}/build/include/synthetic.inc.h',
                           f'build inc_img_bins_{region}: phony'])
+            if region == 'pal':
+                self.write('refs/papermario/ver/pal/splat.yaml',
+                           'segments:\n'
+                           '  - name: main\n    type: code\n    start: 0x0\n    vram: 0x80025C00\n'
+                           '  - name: font\n    type: code\n    start: 0x10\n    vram: 0\n'
+                           '    subsegments:\n      - type: .data\n        name: font\n'
+                           '  - name: map\n    type: code\n    start: 0x20\n    vram: 0x80240000\n')
             self.write(f'refs/papermario/ver/{region}/papermario.ld', '\n'.join(ld) + '\n')
             self.write(f'refs/papermario/ver/{region}/undefined_syms.txt',
                        f'{region}_only_symbol = 0x1234;\ngBackgroundImage = 0x80200000;\n')
@@ -1307,6 +1314,183 @@ class BuildGeneratorTests(unittest.TestCase):
         self.assertEqual(list((self.build / 'pal').glob('.gen-build-*')), [])
 
 
+
+    def test_pal_numeric_rom_name_is_link_safe_and_identity_unchanged(self):
+        table = self.build / 'pal/rom_segments.json'
+        ranges = json.loads(table.read_text())
+        marker = ranges[-1]['rom_start']
+        ranges.insert(-1, {'name': '1942C40', 'type': 'code',
+                           'rom_start': marker, 'rom_end': marker + 16})
+        ranges[-1]['rom_start'] = marker + 16
+        table.write_text(json.dumps(ranges))
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        symbols = (self.build / 'pal/rom_syms.ld').read_text()
+        self.assertIn('PROVIDE(seg_1942C40_ROM_START = ', symbols)
+        self.assertNotIn('PROVIDE(1942C40_ROM_START', symbols)
+        self.assertIn('1942C40', [x['name'] for x in json.loads(table.read_text())])
+
+    def test_pal_numeric_link_name_collision_fails_closed(self):
+        table = self.build / 'pal/rom_segments.json'
+        ranges = json.loads(table.read_text())
+        marker = ranges[-1]['rom_start']
+        for i, name in enumerate(('1942C40', 'seg_1942C40')):
+            ranges.insert(-1, {'name': name, 'type': 'code',
+                               'rom_start': marker + i*16, 'rom_end': marker + (i+1)*16})
+        ranges[-1]['rom_start'] = marker + 32
+        table.write_text(json.dumps(ranges))
+        result = self.cli('--region', 'pal')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('linker symbol collision', result.stderr)
+
+    def test_pal_zero_vram_data_size_requires_declared_data_segment(self):
+        header = self.decomp / 'ver/pal/build/include/ld_addrs.h'
+        header.write_text('extern Addr font_DATA_SIZE;\n')
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        symbols = (self.build / 'pal/rom_syms.ld').read_text()
+        self.assertIn('PROVIDE(font_DATA_SIZE = 0x00000010);', symbols)
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        splat.write_text(splat.read_text().replace('      - type: .data', '      - type: .rodata'))
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('PROVIDE(font_DATA_SIZE', (self.build / 'pal/rom_syms.ld').read_text())
+
+    def test_pal_follow_uses_verified_explicit_splat_vram(self):
+        ld = self.decomp / 'ver/pal/papermario.ld'
+        obj = 'ver/pal/build/assets/pal/font.c.o'
+        text = ld.read_text().replace(
+            f'    .font 0x00000000 :\n        {obj}(.text);',
+            f'    .font 0x00000000 : AT(font_ROM_START) SUBALIGN(8)\n'
+            f'    {{\n        {obj}(.text);\n    }}\n'
+            '    . = ALIGN(., 16);\n    font_VRAM_END = .;')
+        ld.write_text(text.replace('.map 0x80240000 :', '.map font_VRAM_END :'))
+        header = self.decomp / 'ver/pal/build/include/ld_addrs.h'
+        header.write_text('extern Addr map_VRAM;\n')
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        splat.write_text(splat.read_text().replace(
+            '    vram: 0x80240000\n', '    vram: 0x10\n    follows_vram: font\n'))
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        symbols = (self.build / 'pal/rom_syms.ld').read_text()
+        self.assertIn('PROVIDE(map_VRAM = 0x00000010);', symbols)
+        splat.write_text(splat.read_text().replace('follows_vram: font', 'follows_vram: main'))
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('PROVIDE(map_VRAM', (self.build / 'pal/rom_syms.ld').read_text())
+
+    def test_pal_missing_splat_is_rejected_before_publication(self):
+        (self.decomp / 'ver/pal/splat.yaml').unlink()
+        result = self.cli('--region', 'pal')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('splat.yaml', result.stderr)
+        self.assertFalse((self.build / 'pal/rom_syms.ld').exists())
+
+    def test_pal_splat_duplicate_code_segment_is_rejected(self):
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        splat.write_text(splat.read_text() +
+                         '  - name: font\n    type: code\n    start: 0x10\n    vram: 0\n')
+        result = self.cli('--region', 'pal')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ambiguous PAL Splat code segment', result.stderr)
+
+    def test_pal_splat_nested_name_does_not_override_parent(self):
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        splat.write_text(splat.read_text().replace(
+            '      - type: .data\n        name: font',
+            '      - type: .data\n        name: nested_data'))
+        facts = gen_build.pal_splat_code_facts(splat)
+        self.assertIn('font', facts)
+        self.assertTrue(facts['font']['has_data'])
+        self.assertNotIn('nested_data', facts)
+
+    def test_pal_splat_nested_mapping_data_is_detected_without_clobbering_parent(self):
+        # Mirrors real PAL: `- start: ...` and a nested `type: .data`.
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        original = splat.read_text()
+        needle = '      - type: .data\n        name: font'
+        self.assertIn(needle, original)
+        splat.write_text(original.replace(
+            needle,
+            '      - start: 0x10\n        type: .data\n        name: child_data'))
+        facts = gen_build.pal_splat_code_facts(splat)
+        self.assertIn('font', facts)
+        self.assertTrue(facts['font']['has_data'])
+        self.assertEqual(facts['font']['start'], 0x10)
+        self.assertEqual(facts['font']['vram'], 0)
+        self.assertNotIn('child_data', facts)
+        header = self.decomp / 'ver/pal/build/include/ld_addrs.h'
+        header.write_text('extern Addr font_DATA_SIZE;\n')
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('PROVIDE(font_DATA_SIZE = 0x00000010);',
+                      (self.build / 'pal/rom_syms.ld').read_text())
+
+    def test_pal_json_splat_reads_only_top_level_code_facts(self):
+        # rom_segments integration historically writes JSON (valid YAML).
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        splat.write_text(json.dumps({'segments': [
+            {'name': 'font', 'type': 'code', 'start': 16, 'vram': 0,
+             'subsegments': [{'start': 16, 'type': '.data', 'name': 'nested'}]},
+            {'name': 'map', 'type': 'code', 'start': 32, 'vram': 0x80240000},
+            {'name': None, 'type': None, 'start': 48},
+        ]}))
+        facts = gen_build.pal_splat_code_facts(splat)
+        self.assertEqual(facts['font']['start'], 16)
+        self.assertEqual(facts['font']['vram'], 0)
+        self.assertTrue(facts['font']['has_data'])
+        self.assertFalse(facts['map']['has_data'])
+        self.assertNotIn('nested', facts)
+        self.assertEqual(set(facts), {'font', 'map'})
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_pal_json_splat_rejects_ambiguous_and_malformed_segments(self):
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        cases = (
+            ('{"segments": {}}', 'top-level segments list'),
+            ('{"segments": [null]}', 'invalid PAL Splat JSON segment'),
+            (json.dumps({'segments': [
+                {'name': 'font', 'type': 'code'},
+                {'name': 'font', 'type': 'code'}]}), 'ambiguous PAL Splat code segment'),
+            ('{"segments": [', 'invalid PAL Splat JSON'),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                splat.write_text(body)
+                result = self.cli('--region', 'pal')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+    def test_pal_pause_gfx_overlays_follow_data_backed_metadata(self):
+        splat = self.decomp / 'ver/pal/splat.yaml'
+        for name in ('pause_gfx_en', 'pause_gfx_de', 'pause_gfx_fr', 'pause_gfx_es'):
+            splat.write_text(splat.read_text() +
+                f'  - type: code\n    name: {name}\n    start: 0x20\n'
+                '    vram: 0x8027AA10\n    subsegments:\n'
+                f'      - start: 0x20\n        type: .data\n        name: {name}\n')
+        ld = self.decomp / 'ver/pal/papermario.ld'
+        ld.write_text(ld.read_text() + ''.join(
+            f'    .{name} 0x8027AA10 :\n'
+            for name in ('pause_gfx_en', 'pause_gfx_de', 'pause_gfx_fr', 'pause_gfx_es')))
+        table = self.build / 'pal/rom_segments.json'
+        ranges = json.loads(table.read_text())
+        marker = ranges[-1]['rom_start']
+        for i, name in enumerate(('pause_gfx_en', 'pause_gfx_de', 'pause_gfx_fr', 'pause_gfx_es')):
+            ranges.insert(-1, {'name': name, 'type': 'code', 'rom_start': marker + 16*i,
+                               'rom_end': marker + 16*(i+1)})
+            # Mirror new range starts in top-level Splat metadata.
+            splat.write_text(splat.read_text().replace(
+                f'name: {name}\n    start: 0x20',
+                f'name: {name}\n    start: 0x{marker + 16*i:X}'))
+        ranges[-1]['rom_start'] = marker + 64
+        table.write_text(json.dumps(ranges))
+        result = self.cli('--region', 'pal')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        symbols = (self.build / 'pal/rom_syms.ld').read_text()
+        for name in ('pause_gfx_en', 'pause_gfx_de', 'pause_gfx_fr', 'pause_gfx_es'):
+            for suffix in ('TEXT_START','TEXT_END','DATA_START','RODATA_END','BSS_START','BSS_END'):
+                self.assertIn(f'PROVIDE({name}_{suffix} = 0);', symbols)
 
 class InputPathNormalizationTests(unittest.TestCase):
     def setUp(self):
