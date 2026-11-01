@@ -133,6 +133,20 @@ The game-side definitions become `VERSION=pal` and `VERSION_PAL`; host-side
 platform definitions stay as before. PAL diagnostic segment classes use generic
 `fixed`/`follow`/`effect` categories rather than US-specific VRAM window labels.
 
+PMRET prerequisite and selected C-source paths are normalized lexically before
+existence checks; removable missing intermediate directories are supported.
+Sources use the same normalized paths in generated Make/Ninja descriptions.
+Relative paths and absolute paths under the known host/container PMRET roots
+are accepted; foreign absolute paths, root escapes and cross-region prerequisites
+are rejected. Symlink resolution is a separate containment check: symlinks within
+PMRET are preserved, but a `..` after a traversed symlink is conservatively rejected
+rather than silently changing its meaning. Each component is inspected with
+`lstat()`: only ENOENT means missing. Uninspectable components (including permission
+errors, EIO and ENOTDIR) abort with the affected path before publication. Paths
+must remain stable during checks and generation; concurrent filesystem changes
+are outside this protection. This does not rewrite PMRET sources, embedded include/incbin
+strings, arbitrary compiler flags, or the upstream Ninja graph.
+
 The corresponding PMRET split and the `generated_code_pal` and `inc_img_bins_pal`
 prerequisites must have completed first. This includes generated C files, headers,
 image includes and `message_ids.h`/`ld_addrs.h`. The generator checks prerequisite

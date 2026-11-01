@@ -387,10 +387,56 @@ def write_mac_makefile(plat, units, defs, paths=None, out_dir=None):
     with open(os.path.join(out_dir, f'{plat}_game.mk'), 'w') as f:
         f.write('\n'.join(out) + '\n')
 
-def local_input(path):
+def normalized_input(path):
+    """Lexically normalize a PMRET input without cancelling symlink traversal.
+
+    Missing ordinary directories may be cancelled, as in Ninja's generated
+    dependency names. A preceding symlink makes '..' ambiguous, so reject that
+    combination rather than silently replacing filesystem semantics.
+    """
+    prefix = ''
     if path.startswith(C_DECOMP + '/'):
-        return DECOMP + path[len(C_DECOMP):]
-    return path if os.path.isabs(path) else os.path.join(DECOMP, path)
+        prefix, path = C_DECOMP + '/', path[len(C_DECOMP) + 1:]
+    elif path.startswith(DECOMP + '/'):
+        prefix, path = DECOMP + '/', path[len(DECOMP) + 1:]
+    elif os.path.isabs(path):
+        raise ValueError(f'foreign absolute PMRET input path: {path}')
+    original = prefix + path
+    parts, symlink_seen = [], False
+    for part in path.split('/'):
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if not parts:
+                raise ValueError(f'PMRET input escapes its root: {original}')
+            if symlink_seen:
+                raise ValueError(f'cannot normalize PMRET input across a symlink: {original}')
+            parts.pop()
+        else:
+            parts.append(part)
+            component = Path(DECOMP).joinpath(*parts)
+            try:
+                metadata = component.lstat()
+            except OSError as error:
+                # Only ENOENT proves absence. In particular EACCES, EIO and
+                # ENOTDIR must not turn an uninspectable component into a
+                # supposedly ordinary directory which '..' could remove.
+                if error.errno != errno.ENOENT:
+                    raise ValueError(f'cannot inspect PMRET input component {component} '
+                                     f'(input {original}): {error}') from error
+            else:
+                symlink_seen |= stat.S_ISLNK(metadata.st_mode)
+    if not parts:
+        raise ValueError(f'PMRET input must name a file: {original}')
+    relative = '/'.join(parts)
+    target = resolved_path(Path(DECOMP) / relative)
+    if not target.is_relative_to(resolved_path(Path(DECOMP))):
+        raise ValueError(f'PMRET input resolves outside its root: {original}')
+    return relative
+
+
+def local_input(path):
+    return os.path.join(DECOMP, normalized_input(path))
 
 
 def preflight(paths, segs, units, ninja, plat):
@@ -436,7 +482,13 @@ def preflight(paths, segs, units, ninja, plat):
     for filename in dict.fromkeys(required):
         if '$' in filename:
             die(f'unsupported unresolved Ninja input: {filename}')
-        if not os.path.isfile(local_input(filename)):
+        local = local_input(filename)
+        other = 'pal' if region == 'us' else 'us'
+        spellings = (normalized_input(filename),
+                     str(resolved_path(Path(local)).relative_to(resolved_path(Path(DECOMP)))))
+        if any(re.search(rf'\b(?:ver|assets)/{other}/', spelling) for spelling in spellings):
+            die(f'prerequisite references the wrong region: {filename}')
+        if not os.path.isfile(local):
             die(f'missing {filename}; run ./configure {region}, then ninja generated_code_{region} inc_img_bins_{region}')
     filename = os.path.join(paths.local, 'rom_segments.json')
     if not os.path.isfile(filename):
@@ -620,6 +672,9 @@ def generate(plat, region='us'):
             if info['rule'] == 'bin':
                 skipped['bin'] += 1
                 continue
+            # The same spelling must reach validation and emitted Make/Ninja
+            # source dependencies; do not fix only the existence check.
+            info['src'] = normalized_input(info['src'])
             if skip_src.match(info['src']) and not portable_os.match(info['src']):
                 skipped['os/boot/dead'] += 1
                 continue

@@ -1,5 +1,6 @@
 """Synthetic native-generator tests; never build or run any game code."""
 from contextlib import redirect_stderr, redirect_stdout
+import errno
 import hashlib
 import io
 import json
@@ -310,6 +311,148 @@ class BuildGeneratorTests(unittest.TestCase):
                 result = self.cli('--region', region)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.snapshot(region), snapshot)
+
+    def test_prerequisite_paths_normalize_without_intermediate_directories(self):
+        for region in ('us', 'pal'):
+            with self.subTest(region=region):
+                self.assertEqual(self.cli('--region', region).returncode, 0)
+                before = self.snapshot(region)
+                other = self.snapshot('pal' if region == 'us' else 'us')
+                ninja = self.decomp / 'build.ninja'
+                original = ninja.read_text()
+                canonical = f'ver/{region}/build/include/synthetic.inc.h'
+                alias = f'ver/{region}/build/include/absent/nested/../.././synthetic.inc.h'
+                self.assertFalse((self.decomp / f'ver/{region}/build/include/absent').exists())
+                ninja.write_text(original.replace(canonical, alias))
+                result = self.cli('--region', region)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.snapshot(region), before)
+                self.assertEqual(self.snapshot('pal' if region == 'us' else 'us'), other)
+                ninja.write_text(original)
+
+    def test_source_paths_are_canonical_in_all_native_build_descriptions(self):
+        ninja = self.decomp / 'build.ninja'
+        original = ninja.read_text()
+        for region in ('us', 'pal'):
+            for platform in ('pc', 'handheld', 'miyoo'):
+                with self.subTest(region=region, platform=platform):
+                    ninja.write_text(original)
+                    self.assertEqual(self.cli(platform, '--region', region).returncode, 0)
+                    before = self.snapshot(region)
+                    for alias in ('src/absent/.././main.c',
+                                  '/work/refs/papermario/src/absent/../main.c',
+                                  str(self.decomp / 'src/absent/../main.c')):
+                        with self.subTest(alias=alias):
+                            ninja.write_text(original.replace(
+                                f'build ver/{region}/build/src/main.c.o: cc src/main.c',
+                                f'build ver/{region}/build/src/main.c.o: cc {alias}'))
+                            result = self.cli(platform, '--region', region)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(self.snapshot(region), before)
+        ninja.write_text(original)
+
+    def test_invalid_input_paths_preserve_outputs_and_region_isolation(self):
+        ninja = self.decomp / 'build.ninja'
+        original = ninja.read_text()
+        inside = self.decomp / 'different/subdirectory'
+        inside.mkdir(parents=True)
+        (self.decomp / 'different/main.c').write_text('/* other synthetic source */')
+        (self.decomp / 'src/redirect').symlink_to('../different/subdirectory', target_is_directory=True)
+        outside = self.write('outside.h', '/* external synthetic input */')
+        (self.decomp / 'src/escape').symlink_to(outside)
+        for region in ('us', 'pal'):
+            other_region = 'pal' if region == 'us' else 'us'
+            header = f'ver/{region}/build/include/synthetic.inc.h'
+            cross = self.decomp / f'ver/{region}/build/include/cross.h'
+            cross.symlink_to(self.decomp / f'ver/{other_region}/build/include/synthetic.inc.h')
+            cases = [('source escape', 'src/../../outside.h', True),
+                     ('source foreign absolute', str(outside), True),
+                     ('source symlink cancellation', 'src/redirect/../main.c', True),
+                     ('source external symlink', 'src/escape', True),
+                     ('prerequisite escape', '../outside.h', False),
+                     ('prerequisite foreign absolute', str(outside), False),
+                     ('prerequisite symlink cancellation', 'src/redirect/../main.c', False),
+                     ('prerequisite hidden other region',
+                      f'ver/{region}/../{other_region}/build/include/synthetic.inc.h', False),
+                     ('prerequisite symlink other region', str(cross), False)]
+            for label, path, source in cases:
+                for existing in (True, False):
+                    with self.subTest(region=region, case=label, existing=existing):
+                        ninja.write_text(original)
+                        if existing:
+                            self.assertEqual(self.cli('--region', region).returncode, 0)
+                        else:
+                            destination = self.build / 'pal' if region == 'pal' else self.build
+                            for filename in self.generated(region):
+                                (destination / filename).unlink()
+                        before, other = self.snapshot(region), self.snapshot(other_region)
+                        if source:
+                            invalid = original.replace(
+                                f'build ver/{region}/build/src/main.c.o: cc src/main.c',
+                                f'build ver/{region}/build/src/main.c.o: cc {path}')
+                        else:
+                            invalid = original.replace(header, path)
+                        ninja.write_text(invalid)
+                        result = self.cli('--region', region)
+                        self.assertNotEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(self.snapshot(region), before)
+                        self.assertEqual(self.snapshot(other_region), other)
+                        if not existing:
+                            self.assertEqual(self.generated(region), {})
+        ninja.write_text(original)
+
+    def test_metadata_failures_abort_before_publication(self):
+        ninja = self.decomp / 'build.ninja'
+        original = ninja.read_text()
+        real_lstat = Path.lstat
+        for region in ('us', 'pal'):
+            fault = self.decomp / f'ver/{region}/build/blocked/link'
+            fault.parent.mkdir(parents=True, exist_ok=True)
+            (fault.parent.parent / 'input.h').write_text('/* synthetic */')
+            alias = f'ver/{region}/build/blocked/link/../../input.h'
+            for source in (False, True):
+                for code in (errno.EACCES, errno.EPERM, errno.EIO, errno.ENOTDIR, errno.ENOMEM, None):
+                    for existing in (False, True):
+                        with self.subTest(region=region, source=source, errno=code, existing=existing):
+                            ninja.write_text(original)
+                            if existing:
+                                self.assertEqual(self.cli('--region', region).returncode, 0)
+                            else:
+                                destination = self.build / 'pal' if region == 'pal' else self.build
+                                for filename in self.generated(region):
+                                    (destination / filename).unlink()
+                            before = self.snapshot(region)
+                            other_region = 'pal' if region == 'us' else 'us'
+                            other = self.snapshot(other_region)
+                            if source:
+                                text = original.replace(
+                                    f'build ver/{region}/build/src/main.c.o: cc src/main.c',
+                                    f'build ver/{region}/build/src/main.c.o: cc {alias}')
+                            else:
+                                text = original.replace(f'ver/{region}/build/include/synthetic.inc.h', alias)
+                            ninja.write_text(text)
+                            failure = OSError(code, 'synthetic metadata failure', str(fault))
+
+                            def fail_lstat(path, *args, **kwargs):
+                                if path == fault:
+                                    raise failure
+                                return real_lstat(path, *args, **kwargs)
+
+                            stderr, stdout = io.StringIO(), io.StringIO()
+                            with patch.multiple(gen_build, ROOT=str(self.root), DECOMP=str(self.decomp)), \
+                                    patch.object(Path, 'lstat', fail_lstat), \
+                                    redirect_stdout(stdout), redirect_stderr(stderr):
+                                with self.assertRaises(SystemExit) as stopped:
+                                    gen_build.main(['--region', region])
+                            self.assertEqual(stopped.exception.code, 1)
+                            self.assertIn('cannot inspect PMRET input component', stderr.getvalue())
+                            self.assertIn(str(fault), stderr.getvalue())
+                            self.assertNotIn('gen_build.py: wrote', stdout.getvalue())
+                            self.assertEqual(self.snapshot(region), before)
+                            self.assertEqual(self.snapshot(other_region), other)
+                            destination = self.build / 'pal' if region == 'pal' else self.build
+                            self.assertEqual(list(destination.glob('.gen-build-*')), [])
+        ninja.write_text(original)
 
     def test_global_follow_validation_on_all_platforms(self):
         for region in ('us', 'pal'):
@@ -815,6 +958,121 @@ class BuildGeneratorTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), us)
         self.assertEqual(list((self.build / 'pal').glob('.gen-build-*')), [])
 
+
+
+class InputPathNormalizationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.decomp = self.root / 'decomp'
+        self.decomp.mkdir()
+        self.enterContext(patch.object(gen_build, 'DECOMP', str(self.decomp)))
+        (self.decomp / 'src').mkdir()
+        (self.decomp / 'src/input.c').write_text('/* synthetic */')
+
+    def test_missing_components_and_multiple_parents(self):
+        for path in ('src/absent/../input.c', 'src/a/b/../../input.c',
+                     './src/./input.c', 'src/absent/.././input.c'):
+            with self.subTest(path=path):
+                self.assertEqual(gen_build.normalized_input(path), 'src/input.c')
+                self.assertTrue(Path(gen_build.local_input(path)).is_file())
+
+    def assert_metadata_failure(self, code):
+        real_lstat = Path.lstat
+        for region in ('us', 'pal'):
+            fault = self.decomp / f'ver/{region}/build/blocked/link'
+            fault.parent.mkdir(parents=True, exist_ok=True)
+            (fault.parent.parent / 'input.h').write_text('/* synthetic */')
+            failure = OSError(code, 'synthetic metadata failure', str(fault))
+
+            def fail_lstat(path, *args, **kwargs):
+                if path == fault:
+                    raise failure
+                return real_lstat(path, *args, **kwargs)
+
+            with self.subTest(region=region, errno=code), patch.object(Path, 'lstat', fail_lstat):
+                with self.assertRaisesRegex(ValueError, 'cannot inspect PMRET input component') as raised:
+                    gen_build.normalized_input(f'ver/{region}/build/blocked/link/../../input.h')
+            self.assertIn(str(fault), str(raised.exception))
+            self.assertIs(raised.exception.__cause__, failure)
+
+    def test_permission_metadata_errors(self):
+        for code in (errno.EACCES, errno.EPERM):
+            self.assert_metadata_failure(code)
+
+    def test_io_metadata_error(self):
+        self.assert_metadata_failure(errno.EIO)
+
+    def test_other_metadata_errors(self):
+        for code in (errno.ENOMEM, errno.ELOOP, errno.ENAMETOOLONG, None):
+            self.assert_metadata_failure(code)
+
+    def test_not_directory_metadata_error(self):
+        self.assert_metadata_failure(errno.ENOTDIR)
+
+    def test_existing_ordinary_directory_can_be_cancelled(self):
+        for region in ('us', 'pal'):
+            directory = self.decomp / f'ver/{region}/build/ordinary'
+            directory.mkdir(parents=True)
+            expected = directory.parent / 'input.h'
+            expected.write_text('/* synthetic */')
+            self.assertEqual(gen_build.local_input(f'ver/{region}/build/ordinary/../input.h'), str(expected))
+
+    def test_known_dependency_shapes_with_synthetic_files(self):
+        shapes = [('include/', 'area_mac/mac_01', 'toad_house/blanket.png.h'),
+                  ('include/', 'area_kzn/kzn_19', 'lava_piranha/vine.png.h'),
+                  ('', 'area_mac/mac_01', 'toad_house/blanket.png.bin'),
+                  ('', 'area_kzn/kzn_19', 'lava_piranha/vine.png.bin'),
+                  ('', 'area_kzn/kzn_19', 'lava_piranha/vine.pal.bin')]
+        for region in ('us', 'pal'):
+            for prefix, discarded, target in shapes:
+                with self.subTest(region=region, target=target):
+                    root = f'ver/{region}/build/{prefix}world/'
+                    expected = self.decomp / (root + target)
+                    expected.parent.mkdir(parents=True, exist_ok=True)
+                    expected.write_bytes(b'synthetic')
+                    self.assertFalse((self.decomp / (root + discarded)).exists())
+                    alias = root + discarded + '/../../' + target
+                    self.assertEqual(gen_build.local_input(alias), str(expected))
+                    self.assertTrue(Path(gen_build.local_input(alias)).is_file())
+
+    def test_known_absolute_roots(self):
+        for root in (gen_build.C_DECOMP, str(self.decomp)):
+            path = root + '/src/absent/../input.c'
+            self.assertEqual(gen_build.normalized_input(path), 'src/input.c')
+
+    def test_escape_and_foreign_absolute_paths(self):
+        for path in ('../input.c', 'src/../../input.c', '/etc/passwd',
+                     gen_build.C_DECOMP + '-foreign/src/input.c',
+                     gen_build.C_DECOMP + '/../input.c'):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    gen_build.normalized_input(path)
+
+    def test_internal_symlink_is_preserved_without_parent_cancellation(self):
+        (self.decomp / 'alias').symlink_to('src', target_is_directory=True)
+        self.assertEqual(gen_build.normalized_input('alias/./input.c'), 'alias/input.c')
+        self.assertTrue(Path(gen_build.local_input('alias/input.c')).is_file())
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            gen_build.normalized_input('alias/../src/input.c')
+
+    def test_relative_symlink_chain_cannot_escape(self):
+        (self.decomp / 'first').symlink_to('second')
+        (self.decomp / 'second').symlink_to('../outside')
+        (self.root / 'outside').write_text('/* synthetic */')
+        with self.assertRaisesRegex(ValueError, 'outside its root'):
+            gen_build.normalized_input('first')
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            gen_build.normalized_input('first/../src/input.c')
+
+    def test_dangling_symlink_cannot_be_cancelled(self):
+        (self.decomp / 'dangling').symlink_to('absent')
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            gen_build.normalized_input('dangling/../src/input.c')
+
+    def test_symlink_loop_is_reported(self):
+        (self.decomp / 'loop').symlink_to('loop')
+        with self.assertRaisesRegex(ValueError, 'symlink loop'):
+            gen_build.normalized_input('loop')
 
 
 class LinkerFollowParserTests(unittest.TestCase):
