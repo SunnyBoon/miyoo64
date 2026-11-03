@@ -841,6 +841,24 @@ index 86d6340..19f8903 100644
                  src++;
                  dest++;
  
+diff --git a/src/battle/area/kzn2/actor/lava_piranha.c b/src/battle/area/kzn2/actor/lava_piranha.c
+index fef58ec..8cc6f6c 100644
+--- a/src/battle/area/kzn2/actor/lava_piranha.c
++++ b/src/battle/area/kzn2/actor/lava_piranha.c
+@@ -1350,6 +1350,13 @@ EvtScript N(EVS_Attack_FireBreath) = {
+ extern s32 N(FakeoutMusicTime);
+ 
+ API_CALLABLE(N(ManageFakeoutMusic)) {
++#ifdef PM64_PORT
++    if (isInitialCall) {
++        // 0 as the N64's fresh copy of the battle area leaves it: natively a second fight in a session started past
++        // 340, so the victory song played on through the second phase and the boss theme never came back
++        N(FakeoutMusicTime) = 0;
++    }
++#endif
+     N(FakeoutMusicTime)++;
+ 
+     // play 'end battle' song
 diff --git a/src/battle/btl_states_actions.c b/src/battle/btl_states_actions.c
 index 22cbf2b..fdb7a71 100644
 --- a/src/battle/btl_states_actions.c
@@ -861,6 +879,46 @@ index 22cbf2b..fdb7a71 100644
              general_heap_free(compressedAsset);
  
              ASSERT(size <= 0x8000);
+diff --git a/src/battle/common/move/StarBeamSupport.inc.c b/src/battle/common/move/StarBeamSupport.inc.c
+index cfe4773..ba9d3ea 100644
+--- a/src/battle/common/move/StarBeamSupport.inc.c
++++ b/src/battle/common/move/StarBeamSupport.inc.c
+@@ -76,6 +76,19 @@ API_CALLABLE(N(ProcessPeachStarBeam)) {
+ 
+     if (isInitialCall) {
+         N(StarBeamStage) = 0;
++#ifdef PM64_PORT
++        {
++            // as the N64's fresh copy of the move leaves them (it is copied from the ROM at each use): natively the
++            // second beam of a session found every spirit's delay at -1, so the spirits jumped into place and left at once
++            static const s32 delays[] = { 35, 0, 5, 10, 15, 20, 25, 30 };
++            s32 j;
++
++            for (j = 0; j < ARRAY_COUNT(delays); j++) {
++                N(SpiritsFlyDelay)[j] = delays[j];
++                N(SpiritsFlyAwayDelay)[j] = delays[j];
++            }
++        }
++#endif
+         script->functionTemp[FT_IS_PEACH_BEAM] = evt_get_variable(script, *args++);
+         script->functionTemp[FT_STATE] = PEACH_STAR_BEAM_CREATE_EFFECT;
+     }
+diff --git a/src/battle/move/jump/power_bounce.c b/src/battle/move/jump/power_bounce.c
+index 9d024bb..5610bad 100644
+--- a/src/battle/move/jump/power_bounce.c
++++ b/src/battle/move/jump/power_bounce.c
+@@ -36,6 +36,11 @@ BSS s32 N(HitCounter);
+ 
+ API_CALLABLE(N(InitializeHitCounter)) {
+     N(HitCounter) = 0;
++#ifdef PM64_PORT
++    // the N64 copies this move from the ROM each time it is used (LoadMoveScript), so every use starts at 200; natively
++    // the chance a use ended on stayed for the next one, and after a few chains Power Bounce stopped after a bounce
++    N(BaseHitChance) = 200;
++#endif
+     return ApiStatus_DONE2;
+ }
+ 
 diff --git a/src/collision.c b/src/collision.c
 index 481d032..07548ec 100644
 --- a/src/collision.c
