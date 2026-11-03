@@ -6,6 +6,10 @@
 # A launcher may set @ENV@_ROTATE=0 first (MinUI's SDL turns the panel itself).
 DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$DIR" || exit 1
+# M14.34: discard inherited PM64 diagnostic/path overrides.
+for PM64_TEST_KEY in $(env | sed -n 's/^\(PM64_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    unset "$PM64_TEST_KEY"
+done
 mkdir -p data
 echo "$(date) $0 $* (LD_PRELOAD=$LD_PRELOAD)" > data/launch.log
 export @ENV@_DATA="@DATADIR@" # game.json "data": where the game keeps what it writes
