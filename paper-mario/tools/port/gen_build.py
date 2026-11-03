@@ -1027,6 +1027,10 @@ def generate(plat, region='us'):
                      'port_mixer.c', 'port_audio_out.c', 'port_hh.c', 'port_state.c'}
         kit_inc = f'-I{C_ROOT}/bench/kit -I{C_ROOT}/kit/platform -I{C_DECOMP}/include'
         kit_defs = '-DTARGET_HANDHELD=1 -DPM64=1 -DF3DEX_GBI_2=1 -D_LANGUAGE_C=1 -DPORT_NO_FPS=1 -DNON_MATCHING=1 -DAVOID_UB=1'
+        if region == 'pal':
+            # Host-side ROM readers don't see the decomp's VERSION_PAL define.
+            # US output intentionally stays byte-for-byte unchanged.
+            kit_defs += ' -DPM64_ROM_REGION_PAL=1'
         kit_cflags = ('-std=gnu11 -O2 -g -fsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-math-errno -ffp-contract=off '
                       '-fsingle-precision-constant -w')
         if plat == 'pc':

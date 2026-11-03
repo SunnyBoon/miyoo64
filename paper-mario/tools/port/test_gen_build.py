@@ -150,6 +150,26 @@ class BuildGeneratorTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.hashes(), US_BASELINES[platform])
 
+    def test_pal_host_rom_identity_define_is_present_on_all_platforms(self):
+        for platform in ('pc', 'handheld', 'miyoo'):
+            with self.subTest(platform=platform):
+                result = self.cli(platform, '--region', 'pal')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                ninja = (self.build / f'pal/{platform}.ninja').read_text()
+                self.assertIn(' -DPM64_ROM_REGION_PAL=1', ninja)
+                host = ninja.split('rule cc_host\n', 1)[1].split('rule ', 1)[0]
+                self.assertIn('-DPM64_ROM_REGION_PAL=1', host)
+                game = ninja.split('rule cc_game_port\n', 1)[1].split('rule ', 1)[0]
+                self.assertNotIn('-DPM64_ROM_REGION_PAL', game)
+
+    def test_us_host_rom_identity_define_is_absent_on_all_platforms(self):
+        for platform in ('pc', 'handheld', 'miyoo'):
+            with self.subTest(platform=platform):
+                result = self.cli(platform, '--region', 'us')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                ninja = (self.build / f'{platform}.ninja').read_text()
+                self.assertNotIn('-DPM64_ROM_REGION_PAL', ninja)
+
     def test_explicit_us_is_identical_to_default(self):
         self.assertEqual(self.cli().returncode, 0)
         before = self.generated()
