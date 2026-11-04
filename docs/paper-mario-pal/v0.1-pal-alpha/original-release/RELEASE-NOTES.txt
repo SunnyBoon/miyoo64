@@ -1,0 +1,40 @@
+# Paper Mario PAL – 0.1-pal-alpha
+
+An **alpha pre-release** of the native ARM Paper Mario European PAL port for **Miyoo Mini Plus with OnionOS**. Includes **English, German, French and Spanish**. Download the ready-to-install OnionOS ZIP; **no compilation is required**.
+
+## Install
+
+Download **PaperMarioPAL-0.1-pal-alpha-OnionOS.zip**, verify SHA256SUMS, and extract it at the SD-card root so the app is under **App/PaperMarioPAL/**. Also download and keep **LICENSE**, **NOTICE.md** and **THIRD-PARTY-LICENSES.txt** with the ZIP; these contain the attribution and complete accompanying license texts.
+
+You must supply your own **Paper Mario (Europe, PAL)** ROM as **App/PaperMarioPAL/rom.z64**: canonical **64 MiB (67,108,864-byte) big-endian Z64**, SHA-1 **2111d39265a317414d359e35a7d971c4dfa5f9e1**. No ROM or extracted game assets are included, and no ROM download is provided. The app creates its required data locally on first startup.
+
+Complete instructions:
+
+- [English](https://github.com/SunnyBoon/miyoo64/releases/download/v0.1-pal-alpha/INSTALLATION-EN.md)
+- [Deutsch](https://github.com/SunnyBoon/miyoo64/releases/download/v0.1-pal-alpha/INSTALLATION-DE.md)
+- [Français](https://github.com/SunnyBoon/miyoo64/releases/download/v0.1-pal-alpha/INSTALLATION-FR.md)
+- [Español](https://github.com/SunnyBoon/miyoo64/releases/download/v0.1-pal-alpha/INSTALLATION-ES.md)
+
+## Confirmed hardware scope
+
+The **exact end-user ZIP passed 5/5 manual user hardware smoke checks**: start from App/PaperMarioPAL, all four PAL languages, main menu/new game, intro/first battle, regular save/load and save-state/load-state. Its underlying **M14.39b** build was also played stably through the prologue to the **beginning of Chapter 1**. These are user-reported hardware results, not automated measurements. Exact OS version/date were not supplied. This does **not** establish full-game stability or later boss/Beam scenes.
+
+The separate [upstream PAL PR #7](https://github.com/mr-finster/miyoo64/pull/7) uses a different source/binary version with the newer general overlay architecture and its own **8/8** manual hardware result. **This download is the standalone historical alpha**, not that PR's binary. Do not mix pairs, caches or save states. BUILD-PROVENANCE.md records the exact release source and binary identities.
+
+## Known, unfixed graphics issues
+
+- Narrow straight seams on some large trees expose the background.
+- Goombario's enlarged enemy display has only two frame sides instead of four.
+- A Star Piece incorrectly blinks instead of remaining statically visible; its shadow stays visible while it disappears.
+
+No renderer fixes are included here. See KNOWN-ISSUES.md for limits. Keep existing data safe and do not overwrite a different build using the same App/PaperMarioPAL name.
+
+## Integrity and attribution
+
+ZIP SHA-256:
+
+`763c582d37bff03363a14b2d04fe0f3726f44354f3e1098bef6c83302ca4f794`
+
+Source: release/0.1-pal-alpha, commit **3666fbde3106f7215ecb9ab56cf8f1d0c4135203**; intended tag **v0.1-pal-alpha**. Binary stamp **18810FBA**, cache-ID **200078C8**. The tested ZIP and its matching program/recipes are unchanged.
+
+Credits: mr-finster/miyoo64; PMRET and the original game contributors/rightsholders; MK64/Beckerd and SM64-derived port components; Emill/MaikelChan; the attributed Irrlicht clipping authors; SDL/GNU runtime contributors. Original notices remain. The project's MIT notice covers its own port code, not all inherited decompilation/SDK/third-party material. Complete notices/license copies accompany the download in LICENSE, NOTICE.md and THIRD-PARTY-LICENSES.txt. No blanket relicensing or affiliation with Nintendo is claimed.

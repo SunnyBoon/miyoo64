@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "version": "v0.1-pal-alpha",
+  "title": "Paper Mario PAL – 0.1-pal-alpha",
+  "prerelease": true,
+  "source": {
+    "branch": "release/0.1-pal-alpha",
+    "commit": "3666fbde3106f7215ecb9ab56cf8f1d0c4135203",
+    "tag": "v0.1-pal-alpha"
+  },
+  "ZIP_SHA256": "763c582d37bff03363a14b2d04fe0f3726f44354f3e1098bef6c83302ca4f794",
+  "pair": {
+    "build_stamp": "18810FBA",
+    "layout": "0A0D92C4",
+    "recipe_crc": "ED95F0ED",
+    "cache_id": "200078C8"
+  },
+  "binary_SHA256": "9efd71f707ef6297397bfed55f569c8fa1fc9b614b822a4135b2b13ebd508ed4",
+  "recipes_SHA256": "55ab55c7698e93b8d64241e62d7261c5e4ca6e58f5e6bddb11e13648ddaf9aca",
+  "app_files": [
+    {
+      "path": "App/PaperMarioPAL/pm64",
+      "size": 10504480,
+      "mode": "0755",
+      "sha256": "9efd71f707ef6297397bfed55f569c8fa1fc9b614b822a4135b2b13ebd508ed4"
+    },
+    {
+      "path": "App/PaperMarioPAL/recipes.bin",
+      "size": 2287108,
+      "mode": "0644",
+      "sha256": "55ab55c7698e93b8d64241e62d7261c5e4ca6e58f5e6bddb11e13648ddaf9aca"
+    },
+    {
+      "path": "App/PaperMarioPAL/launch.sh",
+      "size": 3228,
+      "mode": "0755",
+      "sha256": "ea6d34c80b1dee620c50d0e59af77198f1325d642e64f107230e17d0b6f6624f"
+    },
+    {
+      "path": "App/PaperMarioPAL/config.json",
+      "size": 1679,
+      "mode": "0644",
+      "sha256": "bf5afd2453df1a9ca4f144343e23ddd50c2450e1040822349e54f4e43f40b988"
+    },
+    {
+      "path": "App/PaperMarioPAL/icon.png",
+      "size": 2080,
+      "mode": "0644",
+      "sha256": "04c14cc389ba333b983839cc2ef10cfc699a23c727aa6f919031844456289ad1"
+    },
+    {
+      "path": "App/PaperMarioPAL/full_resolution",
+      "size": 0,
+      "mode": "0644",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "hardware": {
+    "alpha": {
+      "result": "5/5 PASS",
+      "method": "manual user confirmation",
+      "device": "Miyoo Mini Plus",
+      "OS": "OnionOS",
+      "OS_version": "not supplied",
+      "date": "not supplied",
+      "ZIP_SHA256": "763c582d37bff03363a14b2d04fe0f3726f44354f3e1098bef6c83302ca4f794",
+      "binary_SHA256": "9efd71f707ef6297397bfed55f569c8fa1fc9b614b822a4135b2b13ebd508ed4",
+      "basis": "M14.39b; stable through prologue to Chapter 1 entry",
+      "cases": [
+        "Start from App/PaperMarioPAL",
+        "English/German/French/Spanish",
+        "Main menu/new game",
+        "Intro/first battle",
+        "Regular save/load and save-state/load-state"
+      ]
+    },
+    "separate_PR": {
+      "result": "8/8 PASS",
+      "method": "manual user confirmation M14.45",
+      "source_commit": "9a867e0720744215b36a1fe9fa74ef994ffd243e",
+      "ZIP_SHA256": "45ac2d08bed6a54ad64aec3e1e3e6aa77a4aab51f91de9907ee1b91c5f84835f",
+      "url": "https://github.com/mr-finster/miyoo64/pull/7",
+      "binary_pair_differs": true
+    },
+    "full_game_or_later_scenes_validated": false,
+    "new_hardware_access": false
+  },
+  "files": [
+    {
+      "filename": "BUILD-PROVENANCE.md",
+      "bytes": 2728,
+      "sha256": "2c44a1055fca6b33adb5be135b51c55c214b5bd9db75a0f8b824918e3eff66f2"
+    },
+    {
+      "filename": "INSTALLATION-DE.md",
+      "bytes": 4827,
+      "sha256": "8e87c9796479a9c79b644a975e2e8f8c103fa8d19d357f2cb1867faf80157a02"
+    },
+    {
+      "filename": "INSTALLATION-EN.md",
+      "bytes": 4293,
+      "sha256": "d9e1eb2cd64041b0f3392749cbe4cd71bfaffc0e0adb27cffc943023f8229ca1"
+    },
+    {
+      "filename": "INSTALLATION-ES.md",
+      "bytes": 4804,
+      "sha256": "3a40eba8da95ab6c227aeaeb89c5b37258aa1580e04c999407d94314f6463591"
+    },
+    {
+      "filename": "INSTALLATION-FR.md",
+      "bytes": 5201,
+      "sha256": "c2a6c2c45fe149634b3a60fb3578bdaa86db08746a362e8b364538fa35307aea"
+    },
+    {
+      "filename": "KNOWN-ISSUES.md",
+      "bytes": 1336,
+      "sha256": "72b38726efcf08b824a19f4805e5e310818fb307c77a88f8c301464506d75525"
+    },
+    {
+      "filename": "LICENSE",
+      "bytes": 1250,
+      "sha256": "3c84f57b30d256e94bee7c73314b17f82260a345f28138f46ae30a6b5d7cbeb5"
+    },
+    {
+      "filename": "NOTICE.md",
+      "bytes": 4385,
+      "sha256": "6342f014ddf613f29be0453636a989fa63226ab77effda5c1f31e543409573ca"
+    },
+    {
+      "filename": "PaperMarioPAL-0.1-pal-alpha-OnionOS.zip",
+      "bytes": 4286957,
+      "sha256": "763c582d37bff03363a14b2d04fe0f3726f44354f3e1098bef6c83302ca4f794"
+    },
+    {
+      "filename": "RELEASE-NOTES.md",
+      "bytes": 3669,
+      "sha256": "21e9cf9536eca9ac965a97ca6c404d70d21afb036b576a63ae48d1aed1808092"
+    },
+    {
+      "filename": "THIRD-PARTY-LICENSES.txt",
+      "bytes": 71132,
+      "sha256": "f06c7e85ed97c82143e138fe36e264cae594c61a50bd8d19c43af59dc3e10ece"
+    }
+  ],
+  "self_reference_exclusions": [
+    "RELEASE-MANIFEST.json",
+    "SHA256SUMS"
+  ],
+  "ZIP_repacked": false,
+  "new_build": false
+}
