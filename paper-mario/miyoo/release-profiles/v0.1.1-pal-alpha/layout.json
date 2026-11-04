@@ -1,0 +1,158 @@
+{
+  "version": "v0.1.1-pal-alpha",
+  "source_parent": "3666fbde3106f7215ecb9ab56cf8f1d0c4135203",
+  "tested_ZIP_SHA256": "d65494e451820223279bc2fa442d1a165c861649bc0312a03ecb938e73430f31",
+  "inputs": {
+    "pm64_SHA256": "9efd71f707ef6297397bfed55f569c8fa1fc9b614b822a4135b2b13ebd508ed4",
+    "recipes_SHA256": "55ab55c7698e93b8d64241e62d7261c5e4ca6e58f5e6bddb11e13648ddaf9aca"
+  },
+  "frozen_packaging_files": [
+    {
+      "source": "app/icon.png",
+      "archive_path": "App/PaperMarioPAL/icon.png",
+      "sha256": "b62afab036ea5eb25bdc96a66eef066d9fcd33ad9c388ec7959d20454d1b1a4f"
+    },
+    {
+      "source": "app/config.json",
+      "archive_path": "App/PaperMarioPAL/config.json",
+      "sha256": "bf5afd2453df1a9ca4f144343e23ddd50c2450e1040822349e54f4e43f40b988"
+    },
+    {
+      "source": "app/launch.sh",
+      "archive_path": "App/PaperMarioPAL/launch.sh",
+      "sha256": "ea6d34c80b1dee620c50d0e59af77198f1325d642e64f107230e17d0b6f6624f"
+    },
+    {
+      "source": "app/full_resolution",
+      "archive_path": "App/PaperMarioPAL/full_resolution",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "source": "ports/cover.png",
+      "archive_path": "Roms/PORTS/Imgs/Paper Mario PAL.png",
+      "sha256": "a6fc335f2263fa7544bf5287bdea834462292262138f0e1976c403442022681d"
+    },
+    {
+      "source": "ports/Paper Mario PAL.port",
+      "archive_path": "Roms/PORTS/Shortcuts/Paper Mario PAL.port",
+      "sha256": "5d4a6adeb90316701ec5c4a5f9426e465c291a51bf17490af06b6eb2965f155e"
+    }
+  ],
+  "required_layouts": [
+    "app",
+    "onion-ports"
+  ],
+  "full_resolution_empty_file": true,
+  "ROM_included": false,
+  "no_new_build": true,
+  "artwork_rights_status": "UNVERIFIED / KNOWN PUBLISHER-ACCEPTED RISK",
+  "future_assembly_rule": "Declarative frozen profile. Verify binary/recipe inputs and keep all six packaging files byte-for-byte. Generic packager unchanged; no bit-identical ZIP regeneration claimed. Publish existing verified ZIP after explicit approval.",
+  "artwork_publisher_decision": "ACCEPTED",
+  "archive_members": [
+    {
+      "path": "App/",
+      "bytes": 0,
+      "mode": "0755",
+      "directory": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "App/PaperMarioPAL/",
+      "bytes": 0,
+      "mode": "0755",
+      "directory": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "App/PaperMarioPAL/config.json",
+      "bytes": 1679,
+      "mode": "0644",
+      "directory": false,
+      "sha256": "bf5afd2453df1a9ca4f144343e23ddd50c2450e1040822349e54f4e43f40b988"
+    },
+    {
+      "path": "App/PaperMarioPAL/full_resolution",
+      "bytes": 0,
+      "mode": "0644",
+      "directory": false,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "App/PaperMarioPAL/icon.png",
+      "bytes": 14344,
+      "mode": "0644",
+      "directory": false,
+      "sha256": "b62afab036ea5eb25bdc96a66eef066d9fcd33ad9c388ec7959d20454d1b1a4f"
+    },
+    {
+      "path": "App/PaperMarioPAL/launch.sh",
+      "bytes": 3228,
+      "mode": "0755",
+      "directory": false,
+      "sha256": "ea6d34c80b1dee620c50d0e59af77198f1325d642e64f107230e17d0b6f6624f"
+    },
+    {
+      "path": "App/PaperMarioPAL/pm64",
+      "bytes": 10504480,
+      "mode": "0755",
+      "directory": false,
+      "sha256": "9efd71f707ef6297397bfed55f569c8fa1fc9b614b822a4135b2b13ebd508ed4"
+    },
+    {
+      "path": "App/PaperMarioPAL/recipes.bin",
+      "bytes": 2287108,
+      "mode": "0644",
+      "directory": false,
+      "sha256": "55ab55c7698e93b8d64241e62d7261c5e4ca6e58f5e6bddb11e13648ddaf9aca"
+    },
+    {
+      "path": "Roms/",
+      "bytes": 0,
+      "mode": "0755",
+      "directory": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "Roms/PORTS/",
+      "bytes": 0,
+      "mode": "0755",
+      "directory": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "Roms/PORTS/Games/",
+      "bytes": 0,
+      "mode": "0755",
+      "directory": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "Roms/PORTS/Imgs/",
+      "bytes": 0,
+      "mode": "0755",
+      "directory": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "Roms/PORTS/Imgs/Paper Mario PAL.png",
+      "bytes": 208479,
+      "mode": "0644",
+      "directory": false,
+      "sha256": "a6fc335f2263fa7544bf5287bdea834462292262138f0e1976c403442022681d"
+    },
+    {
+      "path": "Roms/PORTS/Shortcuts/",
+      "bytes": 0,
+      "mode": "0755",
+      "directory": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "Roms/PORTS/Shortcuts/Paper Mario PAL.port",
+      "bytes": 633,
+      "mode": "0755",
+      "directory": false,
+      "sha256": "5d4a6adeb90316701ec5c4a5f9426e465c291a51bf17490af06b6eb2965f155e"
+    }
+  ]
+}

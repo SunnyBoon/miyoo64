@@ -1,0 +1,27 @@
+# Paper Mario PAL v0.1.1-pal-alpha — Installation (Français)
+
+Pour **Miyoo Mini Plus avec OnionOS**. Port natif ARM ; **aucune compilation nécessaire**. Ce paquet ajoute une entrée Ports, une nouvelle icône d'application et une jaquette Ports. Le programme et les recettes restent inchangés.
+
+## Installation et importation dans Ports
+
+1. Après publication, télécharger **PaperMarioPAL-0.1.1-pal-alpha-OnionOS.zip** depuis la préversion **v0.1.1-pal-alpha** sur SunnyBoon/miyoo64. SHA-256 du ZIP : **d65494e451820223279bc2fa442d1a165c861649bc0312a03ecb938e73430f31**. Conserver **NOTICE.md** et **THIRD-PARTY-LICENSES.txt** avec le ZIP ; LICENSE et la documentation complète font partie des documents du dépôt.
+2. Quitter le jeu avant une mise à jour. Extraire à la **racine de la carte SD**, en fusionnant les dossiers existants **App/** et **Roms/**. Préserver exactement **App/PaperMarioPAL/** et **Roms/PORTS/**. Ne pas remplacer ou supprimer les dossiers App ou Roms entiers. Le paquet ne vise pas l'installation américaine d'origine sous App/PaperMario.
+3. Fournir sa propre ROM **Paper Mario (Europe, PAL)** sous **App/PaperMarioPAL/rom.z64**. Format requis : **64 Mio (64 MiB, 67 108 864 octets), Z64 big-endian**, SHA-1 **2111d39265a317414d359e35a7d971c4dfa5f9e1**. Aucune ROM, ressource extraite du jeu, sauvegarde ou cache d'exécution n'est inclus. Renommer une autre ROM ne la convertit pas.
+4. Dans Apps, démarrer **Paper Mario PAL 0.1-pal-alpha**. C'est toujours le nom réel conservé dans le paquet testé sur matériel ; la version du téléchargement est v0.1.1-pal-alpha.
+5. Pour Ports, utiliser la **fonction d'importation des ports de la version OnionOS installée**, puis choisir **Paper Mario PAL** dans Ports. Le lanceur est **Roms/PORTS/Shortcuts/Paper Mario PAL.port**, sa cible d'importation **App/PaperMarioPAL/launch.sh**, et la jaquette **Roms/PORTS/Imgs/Paper Mario PAL.png**. **Roms/PORTS/Games/** doit exister ; ce dossier vide est inclus. Ne pas y placer une seconde ROM ou installation du jeu. Aucune configuration globale Emu n'est fournie ou remplacée.
+6. Au premier démarrage du jeu, l'application vérifie la ROM et crée localement les données nécessaires. Choisir **English, German, French ou Spanish** dans le jeu. Apps et Ports lancent la même application et partagent **App/PaperMarioPAL/data/**, la ROM, les sauvegardes normales et l'emplacement des états de sauvegarde propre à ce build. L'entrée Ports est un relais, pas une seconde installation.
+7. Une installation alpha correspondante utilise son dossier App/PaperMarioPAL existant. Fusionner les fichiers du paquet et conserver **rom.z64** ainsi que **data/** à leur emplacement ; ni l'un ni l'autre ne figure dans le ZIP. Cette mise à jour du paquet n'exige ni migration manuelle des sauvegardes ni suppression du cache. Quitter une session avant de démarrer par l'autre menu.
+
+## Dépannage
+
+- Application absente : vérifier l'arborescence et les six fichiers pm64, recipes.bin, launch.sh, config.json, icon.png, full_resolution. Garder **pm64**, **launch.sh** et le lanceur **.port** exécutables (0755) ; les fichiers ordinaires ont le mode 0644.
+- Entrée Ports/jaquette absente : vérifier les noms PAL exacts, le dossier Games vide et le lanceur de l'application, puis relancer l'importation Ports fournie par OnionOS. Si la prise en charge de Ports/importation manque, consulter la documentation de la version OnionOS installée. Ce ZIP n'installe pas l'importateur système.
+- ROM refusée : vérifier emplacement, taille, ordre des octets Z64 et SHA-1. Ne pas ajouter de seconde ROM dans Roms/PORTS. Aucun lien de téléchargement de ROM n'est proposé.
+- Premier démarrage : laisser finir la création locale des données et vérifier l'espace libre accessible en écriture. Ne pas mélanger programme, recettes, caches ou états avec le build du PR séparé.
+- Sauvegardes différentes : vérifier que les deux lanceurs ciblent toujours le même dossier App. Ne pas déplacer ou écraser les sauvegardes existantes pour diagnostiquer le problème.
+
+## Tests et limites connues
+
+Le mainteneur rapporte **6/6 PASS** pour M14.51 sur un vrai Miyoo Mini Plus : Apps/nouvelle icône, importation Ports, jaquette, démarrage par Ports, sauvegardes partagées, sauvegarde/chargement et retour à OnionOS. Il s'agit d'un **test matériel manuel par l'utilisateur**, pas d'une mesure automatisée ni d'une partie complète. La base M14.39b inchangée avait déjà été jouée du prologue au début du chapitre 1 ; ses anciens tests séparés d'états de sauvegarde ne constituent pas de nouveaux tests DualMenu exhaustifs. Le PR amont plus récent utilise un autre build.
+
+Défauts connus, non corrigés : fines jonctions rectilignes laissant voir le fond sur certains grands arbres ; deux côtés au lieu de quatre au cadre de l'ennemi agrandi par Goombario ; un morceau d'étoile clignote à tort au lieu de rester visible en permanence, tandis que son ombre reste visible. Voir KNOWN-ISSUES.md, NOTICE.md et ARTWORK-PROVENANCE.md. Selon le mainteneur, les deux images ont été créées dans ChatGPT à partir de textes ; l'incertitude restante concernant les droits possibles sur des personnages/logos tiers est expressément acceptée par le responsable de la publication (ARTWORK_PUBLISHER_DECISION: ACCEPTED), sans être présentée comme une autorisation externe. Voir ARTWORK-PUBLISHER-DECISION.md. Ce document prépare la publication et ne prouve pas que v0.1.1-pal-alpha est déjà publié.
