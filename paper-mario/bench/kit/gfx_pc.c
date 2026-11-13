@@ -156,7 +156,7 @@ struct TextureHashmapNode {
     uint32_t last_used_frame;
     
     uint32_t texture_id;
-    uint8_t cms, cmt;
+    uint32_t cms, cmt;
     bool linear_filter;
     uint8_t mirror; // texels imported doubled with the mirrored copy: bit 0 along S, bit 1 along T
 } __attribute__((packed, aligned(4)));
