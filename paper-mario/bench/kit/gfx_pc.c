@@ -1146,8 +1146,8 @@ static inline uint8_t pm_tile_cm(uint8_t cm, uint8_t mask, uint16_t lo, uint16_t
     return cm;
 }
 static inline void pm_render_tile_cm(void) {
-    rdp.texture_tile.cms = pm_tile_cm(rdp.texture_tile.cms_raw, rdp.texture_tile.masks, rdp.texture_tile.uls, rdp.texture_tile.lrs);
-    rdp.texture_tile.cmt = pm_tile_cm(rdp.texture_tile.cmt_raw, rdp.texture_tile.maskt, rdp.texture_tile.ult, rdp.texture_tile.lrt);
+    rdp.texture_tile.cms = (rdp.texture_tile.cms_raw & G_TX_MIRROR) ? rdp.texture_tile.cms_raw : pm_tile_cm(rdp.texture_tile.cms_raw, rdp.texture_tile.masks, rdp.texture_tile.uls, rdp.texture_tile.lrs);
+    rdp.texture_tile.cmt = (rdp.texture_tile.cmt_raw & G_TX_MIRROR) ? rdp.texture_tile.cmt_raw : pm_tile_cm(rdp.texture_tile.cmt_raw, rdp.texture_tile.maskt, rdp.texture_tile.ult, rdp.texture_tile.lrt);
 }
 static uint8_t pm_tmem_hi[2048];        /* TMEM upper half as the RDP holds a TLUT: each entry x4 */
 static int pm_prim_tile;                /* the tile primitives draw from (texrect tile / G_TEXTURE tile) */
@@ -1432,6 +1432,39 @@ static uint8_t gfx_mirror_flags(uint32_t width, uint32_t height) {
     return m;
 }
 
+#ifdef PM64
+/* Baked axes repeat/clamp the doubled image; only unbaked axes reach soft mirror. */
+static inline uint32_t gfx_soft_sampler_cm(uint32_t cm, bool baked) {
+    return baked ? (cm & ~G_TX_MIRROR) : cm;
+}
+/* Preserve the tile clamp separately from the mask period, including when a
+ * mirrored period was physically baked into the uploaded texture. */
+static inline uint32_t pm_sampler_axis(uint32_t cm, bool baked, uint16_t lo, uint16_t hi) {
+    const int extent = ((int)hi - (int)lo + 4) / 4;
+    uint32_t effective = gfx_soft_sampler_cm(cm, baked);
+    if ((cm & (G_TX_MIRROR | G_TX_CLAMP)) == (G_TX_MIRROR | G_TX_CLAMP) && extent > 0)
+        effective |= 0x80000000u | ((uint32_t)extent << 8);
+    return effective;
+}
+static inline uint32_t pm_sampler_tile_axis(int tile, bool t, bool baked) {
+    const int ti = (pm_prim_tile + tile) & 7;
+    const uint32_t cm = t ? pm_tiles[ti].cmt : pm_tiles[ti].cms;
+    const uint8_t mask = t ? pm_tiles[ti].maskt : pm_tiles[ti].masks;
+    const uint16_t lo = t ? pm_tiles[ti].ult : pm_tiles[ti].uls;
+    const uint16_t hi = t ? pm_tiles[ti].lrt : pm_tiles[ti].lrs;
+    return pm_sampler_axis((cm & G_TX_MIRROR) ? cm : pm_tile_cm(cm, mask, lo, hi), baked, lo, hi);
+}
+/* Sampler state belongs to a unit even when both units bind one cache entry.
+ * Complete pending triangles before changing the state used by their rasterizer. */
+static void pm_set_sampler(int tile, bool linear, uint32_t cms, uint32_t cmt) {
+    static struct { uint32_t s,t; bool valid; } last[2];
+    if (!last[tile].valid || last[tile].s != cms || last[tile].t != cmt)
+        gfx_flush();
+    last[tile].s = cms; last[tile].t = cmt; last[tile].valid = true;
+    gfx_rapi->set_sampler_parameters(tile, linear, cms, cmt);
+}
+#endif
+
 static uint32_t gfx_texture_upload_bytes(int tile, uint32_t fmt, uint32_t siz, uint8_t mirror) {
     uint32_t width, height;
     gfx_tile_size(tile, &width, &height);
@@ -1472,7 +1505,11 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
         if ((*node)->texture_addr == orig_addr && (*node)->fmt == fmt && (*node)->siz == siz && (*node)->mirror == mirror) {
             if ((*node)->content_hash == content_hash) {
                 gfx_rapi->select_texture(tile, (*node)->texture_id);
+#ifdef PM64
+                pm_set_sampler(gfx_sampler_tile(tile, *node), (*node)->linear_filter, (*node)->cms, (*node)->cmt);
+#else
                 gfx_rapi->set_sampler_parameters(gfx_sampler_tile(tile, *node), (*node)->linear_filter, (*node)->cms, (*node)->cmt);
+#endif
                 (*node)->last_used_frame = gfx_frame_counter;
                 *n = *node;
                 return true;
@@ -1497,7 +1534,11 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
         stale->linear_filter = false;
         gfx_rapi->select_texture(tile, stale->texture_id);
         texman_bind_tex(stale->texture_id); // select_texture is a no-op if already selected; the upload targets the bound texture
+#ifdef PM64
+        pm_set_sampler(tile, false, 0, 0);
+#else
         gfx_rapi->set_sampler_parameters(tile, false, 0, 0);
+#endif
         *n = stale;
         return false; // caller re-imports into the bound texture's memory
     }
@@ -1512,7 +1553,11 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     if (gfx_debug_frame) port_log("  newtex %u addr %p fmt %u siz %u hash %08X tile %d\n", (*node)->texture_id, orig_addr, fmt, siz, content_hash, tile);
     gfx_rapi->select_texture(tile, (*node)->texture_id);
     texman_bind_tex((*node)->texture_id);
+#ifdef PM64
+    pm_set_sampler(tile, false, 0, 0);
+#else
     gfx_rapi->set_sampler_parameters(tile, false, 0, 0);
+#endif
     (*node)->cms = 0;
     (*node)->cmt = 0;
     (*node)->linear_filter = false;
@@ -2514,6 +2559,7 @@ uint32_t gfx_prof_rebuilds;
  * RDP combiner in gfx_soft (gfx_soft_pm_generic). */
 extern void gfx_soft_pm_generic(bool on, uint32_t w0, uint32_t w1, bool two_cycle, const uint8_t prim[4], const uint8_t env[4],
                                 uint8_t prim_lod, int ds, int dt, const int32_t t1map[6]);
+extern void gfx_soft_tex_size(int tile, int *w, int *h);
 enum { M_COMB, M_T0, M_T1, M_PRIM, M_SHADE, M_ENV, M_ONE, M_ZERO, M_OTHER };
 static int pm_mux_rgb_ab(int v, bool is_b) { return v <= 5 ? v : v == 6 ? (is_b ? M_OTHER : M_ONE) : v == 7 ? M_OTHER : M_ZERO; }
 static int pm_mux_rgb_c(int v) { return v <= 5 ? v : v == 8 ? 100 /* T0 alpha */ : v >= 16 ? M_ZERO : M_OTHER; }
@@ -2673,10 +2719,10 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
             rdp.textures_changed[i] = false;
         }
         if (rendering_state.textures[i] != NULL) {
-            const int ti = i == 0 ? pm_prim_tile : (pm_prim_tile + 1) & 7;
             gfx_rapi->select_texture(i, rendering_state.textures[i]->texture_id);
-            gfx_rapi->set_sampler_parameters(i, false, pm_tile_cm(pm_tiles[ti].cms, pm_tiles[ti].masks, pm_tiles[ti].uls, pm_tiles[ti].lrs),
-                                             pm_tile_cm(pm_tiles[ti].cmt, pm_tiles[ti].maskt, pm_tiles[ti].ult, pm_tiles[ti].lrt));
+            const uint8_t baked = rendering_state.textures[i]->mirror;
+            pm_set_sampler(i, false, pm_sampler_tile_axis(i, false, baked & 1),
+                                     pm_sampler_tile_axis(i, true, baked & 2));
         }
     }
     gfx_tex_stress_hold = 0;
@@ -2899,12 +2945,28 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
             if (rendering_state.textures[i] == NULL) {
                 // Texture unit flagged as used but never successfully imported
                 // (skipped by the guards above): don't dereference a null node.
-            } else if (linear_filter != rendering_state.textures[i]->linear_filter || rdp.texture_tile.cms != rendering_state.textures[i]->cms || rdp.texture_tile.cmt != rendering_state.textures[i]->cmt) {
-                gfx_flush();
-                gfx_rapi->set_sampler_parameters(i, linear_filter, rdp.texture_tile.cms, rdp.texture_tile.cmt);
+            } else {
+#ifdef PM64
+                const uint8_t baked = rendering_state.textures[i]->mirror;
+                const uint32_t cms = pm_sampler_tile_axis(i, false, baked & 1);
+                const uint32_t cmt = pm_sampler_tile_axis(i, true, baked & 2);
+#else
+                const uint32_t cms = rdp.texture_tile.cms, cmt = rdp.texture_tile.cmt;
+#endif
+#ifdef PM64
+                pm_set_sampler(i, linear_filter, cms, cmt);
                 rendering_state.textures[i]->linear_filter = linear_filter;
-                rendering_state.textures[i]->cms = rdp.texture_tile.cms;
-                rendering_state.textures[i]->cmt = rdp.texture_tile.cmt;
+                rendering_state.textures[i]->cms = cms;
+                rendering_state.textures[i]->cmt = cmt;
+#else
+                if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
+                gfx_flush();
+                gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
+                rendering_state.textures[i]->linear_filter = linear_filter;
+                rendering_state.textures[i]->cms = cms;
+                rendering_state.textures[i]->cmt = cmt;
+                }
+#endif
             }
         }
     }
@@ -2939,9 +3001,25 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
     if (tri_state.use_texture) {
         uint32_t tw, th;
         float tex_width, tex_height;
+        bool uv_extent_is_bound_texture = false;
         gfx_tile_size(0, &tw, &th);
         tex_width = (float) tw;
         tex_height = (float) th;
+#ifdef PM64
+        /* Generic TEXEL1-only combines emit UVs for the SoftTex currently
+         * bound at unit 1.  The rasterizer multiplies by that texture's
+         * uploaded extent, so use the same extent here.  With no valid unit-1
+         * binding, retain the established tile-0 frame. */
+        if (pmg && !pmt0 && pmt1 && rendering_state.textures[1] != NULL) {
+            int bound_w, bound_h;
+            gfx_soft_tex_size(1, &bound_w, &bound_h);
+            if (bound_w > 0 && bound_h > 0) {
+                tex_width = (float) bound_w;
+                tex_height = (float) bound_h;
+                uv_extent_is_bound_texture = true;
+            }
+        }
+#endif
         // A degenerate render-tile size (e.g. lrt < ult -> height 0 on a DK
         // Jungle terrain texture) would make 1/tex_height = Inf/NaN, which flows
         // into every vertex UV and faults the hardware GE (the host FPU/GE just
@@ -2951,8 +3029,10 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
         // A mirrored texture was imported at twice the size: one period of the
         // mirror pattern is the whole doubled image.
         tri_state.mirror = rendering_state.textures[0] != NULL ? rendering_state.textures[0]->mirror : 0;
-        if (tri_state.mirror & 1) tex_width *= 2.0f;
-        if (tri_state.mirror & 2) tex_height *= 2.0f;
+        if (!uv_extent_is_bound_texture) {
+            if (tri_state.mirror & 1) tex_width *= 2.0f;
+            if (tri_state.mirror & 2) tex_height *= 2.0f;
+        }
         float filt = ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT) ? 0.5f : 0.0f;
         float inv_w = 1.0f / tex_width, inv_h = 1.0f / tex_height;
 #ifdef PM64
@@ -3836,12 +3916,28 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
             if (rendering_state.textures[i] == NULL) {
                 // Texture unit flagged as used but never successfully imported
                 // (skipped by the guards above): don't dereference a null node.
-            } else if (linear_filter != rendering_state.textures[i]->linear_filter || rdp.texture_tile.cms != rendering_state.textures[i]->cms || rdp.texture_tile.cmt != rendering_state.textures[i]->cmt) {
-                gfx_flush();
-                gfx_rapi->set_sampler_parameters(i, linear_filter, rdp.texture_tile.cms, rdp.texture_tile.cmt);
+            } else {
+#ifdef PM64
+                const uint8_t baked = rendering_state.textures[i]->mirror;
+                const uint32_t cms = pm_sampler_tile_axis(i, false, baked & 1);
+                const uint32_t cmt = pm_sampler_tile_axis(i, true, baked & 2);
+#else
+                const uint32_t cms = rdp.texture_tile.cms, cmt = rdp.texture_tile.cmt;
+#endif
+#ifdef PM64
+                pm_set_sampler(i, linear_filter, cms, cmt);
                 rendering_state.textures[i]->linear_filter = linear_filter;
-                rendering_state.textures[i]->cms = rdp.texture_tile.cms;
-                rendering_state.textures[i]->cmt = rdp.texture_tile.cmt;
+                rendering_state.textures[i]->cms = cms;
+                rendering_state.textures[i]->cmt = cmt;
+#else
+                if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
+                gfx_flush();
+                gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
+                rendering_state.textures[i]->linear_filter = linear_filter;
+                rendering_state.textures[i]->cms = cms;
+                rendering_state.textures[i]->cmt = cmt;
+                }
+#endif
             }
         }
     }
