@@ -1,6 +1,7 @@
 {
-  "id": "pm64palalpha",
-  "title": "Paper Mario PAL",
+  "id": "pm64palalpha04",
+  "identity": "PAL-0.4-STD",
+  "title": "Paper Mario PAL Alpha 0.4",
   "folder": "PaperMarioPAL",
   "exe": "pm64",
   "files": [
@@ -8,8 +9,10 @@
     "recipes.bin"
   ],
   "icon": "icon.png",
+  "readme": "README-PAL-ALPHA-0.4-STD.txt",
   "env": "PM64",
   "data": "data",
+  "empty_dirs": ["data"],
   "rom": {
     "name": "Paper Mario (Europe, PAL)",
     "sha1": "2111d39265a317414d359e35a7d971c4dfa5f9e1",

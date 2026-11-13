@@ -62,7 +62,7 @@ def pair(binary,assets,recipes):
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    for name in ['zip','rom','assets','binary','decomp','graph-root','output']:p.add_argument('--'+name,required=True,type=Path)
+    for name in ['zip','rom','assets','binary','decomp','graph-root','output','game']:p.add_argument('--'+name,required=True,type=Path)
     a=p.parse_args(argv);root=Path(__file__).resolve().parents[2]
     assert a.rom.stat().st_size==67108864 and hashlib.sha1(a.rom.read_bytes()).hexdigest()==PAL_SHA1
     assert git(a.decomp,'rev-parse','HEAD').decode().strip()==PIN
@@ -77,13 +77,22 @@ def main(argv=None):
         git(root,'ls-files','--error-unmatch',path)
     for pattern in ['game/port/*.c','game/port/*.h','kit/platform/*.c','kit/platform/*.h','bench/kit/*.c','bench/kit/*.h','miyoo/templates/*']:
         for f in root.glob(pattern):git(root,'ls-files','--error-unmatch',str(f.relative_to(root)))
-    for f in ['miyoo/tools/miyoo_pack.py','miyoo/icon.png','miyoo/game-pal.json','tools/port/gen_build.py','tools/port/rom_segments.py','tools/port/pal_build.py','tools/port/pal_release_gates.py']:git(root,'ls-files','--error-unmatch',f)
+    for f in ['miyoo/tools/miyoo_pack.py','miyoo/icon.png','miyoo/game-pal.json','miyoo/game-pal-diagnostic.json','tools/port/gen_build.py','tools/port/rom_segments.py','tools/port/pal_build.py','tools/port/pal_release_gates.py']:git(root,'ls-files','--error-unmatch',f)
+    game=json.loads(a.game.read_text())
+    folder=game['folder']
+    empty_dirs=game.get('empty_dirs',[])
+    assert isinstance(empty_dirs,list) and all(d in ['data','traces'] for d in empty_dirs)
     with tempfile.TemporaryDirectory(prefix='pal-release-gate-') as tmp:
-        tmp=Path(tmp);prefix='App/PaperMarioPAL/';names=['pm64','recipes.bin','launch.sh','config.json','icon.png','full_resolution'];files={}
+        tmp=Path(tmp);prefix='App/'+folder+'/';names=['pm64','recipes.bin','launch.sh','config.json','icon.png','full_resolution'];files={}
+        if 'readme' in game:names.append('README.txt')
         with zipfile.ZipFile(a.zip) as z:
-            assert z.testzip() is None and len(z.namelist())==6 and set(z.namelist())=={prefix+n for n in names}
+            expected={prefix+n for n in names}|{prefix+d+'/' for d in empty_dirs}
+            assert z.testzip() is None and set(z.namelist())==expected
             for row in z.infolist():
                 name=Path(row.filename).name;mode=row.external_attr>>16
+                if row.is_dir():
+                    assert row.filename in expected and stat.S_ISDIR(mode) and stat.S_IMODE(mode)==0o755
+                    continue
                 assert stat.S_ISREG(mode) and stat.S_IMODE(mode)==(0o755 if name in ['pm64','launch.sh'] else 0o644)
                 b=z.read(row);assert not re.search(rb'xmpmeta|Photoshop|/Users/|/home/|/root/|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}',b)
                 assert not re.search(rb'PaperMarioPALTest|M143[469]|M14\.39',b)
@@ -91,6 +100,7 @@ def main(argv=None):
         assert files['pm64'].read_bytes()==a.binary.read_bytes()
         launch=files['launch.sh'].read_text();assert 'export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"' in launch
         assert 'export PM64_DATA="$DIR/data"' in launch and 'export HOME="$DIR"' in launch
+        assert ('export PM64_TRACE_DIR="$DIR/traces"' in launch) == ('traces' in empty_dirs)
         subprocess.run(['sh','-n',str(files['launch.sh'])],check=True)
         meta,values=pair(a.binary.read_bytes(),a.assets.read_bytes(),files['recipes.bin'].read_bytes())
         rel=subprocess.run(['readelf','-rW',str(a.binary)],capture_output=True,text=True,check=True).stdout

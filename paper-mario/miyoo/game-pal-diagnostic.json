@@ -1,0 +1,24 @@
+{
+  "id": "pm64palalpha04diag",
+  "identity": "PAL-0.4-DIAG",
+  "title": "Paper Mario PAL Alpha 0.4 Diagnostic",
+  "folder": "PaperMarioPALDiagnostic",
+  "exe": "pm64",
+  "files": [
+    "pm64",
+    "recipes.bin"
+  ],
+  "icon": "icon.png",
+  "readme": "README-PAL-ALPHA-0.4-DIAG.txt",
+  "env": "PM64",
+  "data": "data",
+  "trace_dir": "traces",
+  "empty_dirs": ["data", "traces"],
+  "rom": {
+    "name": "Paper Mario (Europe, PAL)",
+    "sha1": "2111d39265a317414d359e35a7d971c4dfa5f9e1",
+    "size": 67108864
+  },
+  "system": "PAPERMARIOPALDIAG",
+  "minui_tag": "PM64PALDIAG"
+}

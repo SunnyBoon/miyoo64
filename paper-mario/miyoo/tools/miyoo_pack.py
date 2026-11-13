@@ -187,8 +187,15 @@ def main():
     data = g.get('data', 'data')
     if data not in ('.', 'data'):
         sys.exit('game.json data: "." or "data"')
+    trace_dir = g.get('trace_dir')
+    if trace_dir not in (None, 'traces'):
+        sys.exit('game.json trace_dir: "traces" or omitted')
+    empty_dirs = g.get('empty_dirs', [])
+    if not isinstance(empty_dirs, list) or any(d not in ('data', 'traces') for d in empty_dirs):
+        sys.exit('game.json empty_dirs: a list containing only data and/or traces')
     kv = dict(TITLE=title, FOLDER=folder, EXE=exe, ENV=env, ROMNAME=g['rom']['name'],
-              DATADIR='$DIR' if data == '.' else '$DIR/data')
+              IDENTITY=g.get('identity', ''), DATADIR='$DIR' if data == '.' else '$DIR/data',
+              TRACE_SETUP=('export PM64_TRACE_DIR="$DIR/traces"\nmkdir -p "$PM64_TRACE_DIR"' if trace_dir else ''))
     icon_src = open(os.path.join(gdir, g['icon']), 'rb').read()
     icon = icon_64(icon_src)
 
@@ -199,11 +206,18 @@ def main():
     z.add(app + 'launch.sh', tpl('launch.sh', **kv), exe=True)
     z.add(app + 'config.json', tpl('app_config.json', **kv))
     z.add(app + 'icon.png', icon)
+    readme = g.get('readme')
+    if readme is not None:
+        if not isinstance(readme, str) or os.path.basename(readme) != readme:
+            sys.exit('game.json readme: a file name relative to the game JSON')
+        z.add(app + 'README.txt', open(os.path.join(gdir, readme), 'rb').read())
     # Onion on a Mini v4 / Mini Flip (752x560 panel, /tmp/new_res_available) switches the screen to 752x560
     # before an Apps launch only when App/<folder>/full_resolution exists, and puts 640x480 back after any
     # launch (Onion 07505ea runtime.sh:400-423, get_full_resolution_path :586-611). An empty marker; on a
     # 640x480 Mini, Onion never reads it.
     z.add(app + 'full_resolution', '')
+    for directory in empty_dirs:
+        z.mkdir(app + directory)
     if a.rom:
         z.add(app + 'rom.z64', rom_z64(a.rom, g['rom']['sha1'], g['rom'].get('size')), store=True)
 

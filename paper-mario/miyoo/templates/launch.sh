@@ -10,6 +10,7 @@ mkdir -p data
 echo "$(date) $0 $* (LD_PRELOAD=$LD_PRELOAD)" > data/launch.log
 export @ENV@_DATA="@DATADIR@" # game.json "data": where the game keeps what it writes
 export HOME="$DIR"
+@TRACE_SETUP@
 # Sound: the Mini's SDL 1.2 only has OSS (/dev/dsp), which exists through the OS's audioserver and
 # libpadsp.so. Onion preloads it for Apps but not for everything; set it here either way (the
 # GoldenEye port on the user's Mini Plus, 2026-10-01: no sound without it).

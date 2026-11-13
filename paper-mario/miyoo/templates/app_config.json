@@ -2,5 +2,6 @@
   "label": "@TITLE@",
   "icon": "icon.png",
   "launch": "launch.sh",
-  "description": "Native port. Needs your own @ROMNAME@ ROM."
+  "description": "Native port. Needs your own @ROMNAME@ ROM.",
+  "build_identity": "@IDENTITY@"
 }
