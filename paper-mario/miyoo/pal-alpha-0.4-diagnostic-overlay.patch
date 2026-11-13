@@ -1,0 +1,643 @@
+diff --git a/paper-mario/bench/kit/gfx_pc.c b/paper-mario/bench/kit/gfx_pc.c
+index 30ced6d..0d720d9 100644
+--- a/paper-mario/bench/kit/gfx_pc.c
++++ b/paper-mario/bench/kit/gfx_pc.c
+@@ -220,6 +220,13 @@ static struct RSP {
+     struct LoadedVertex loaded_vertices[MAX_VERTICES];
+ } rsp  __attribute__((aligned(16)));
+ 
++/* Observational sidecar: the actual source and scaled S/T survive until the
++ * same LoadedVertex participates in the single ItemEntity trace triangle. */
++static struct {
++    int16_t raw_s, raw_t;
++    int16_t scaled_s, scaled_t;
++} gfx_itemtrace_st[MAX_VERTICES];
++
+ #ifdef PM64
+ #define GFX_LT_SLOTS 8 /* texture loads, by TMEM address (gfx_lt_find) */
+ #else
+@@ -1458,6 +1465,7 @@ static inline uint32_t pm_sampler_tile_axis(int tile, bool t, bool baked) {
+  * Complete pending triangles before changing the state used by their rasterizer. */
+ static void pm_set_sampler(int tile, bool linear, uint32_t cms, uint32_t cmt) {
+     static struct { uint32_t s,t; bool valid; } last[2];
++    /* Software filtering is draw state, not this legacy sampler argument. */
+     if (!last[tile].valid || last[tile].s != cms || last[tile].t != cmt)
+         gfx_flush();
+     last[tile].s = cms; last[tile].t = cmt; last[tile].valid = true;
+@@ -2201,6 +2209,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
+ 
+         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
+         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
++        const short itemtrace_scaled_s = U, itemtrace_scaled_t = V;
+         
+         if (rsp.geometry_mode & G_LIGHTING) {
+             if (rsp.lights_changed) {
+@@ -2288,6 +2297,10 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
+         
+         d->u = U;
+         d->v = V;
++        gfx_itemtrace_st[dest_index].raw_s = v->tc[0];
++        gfx_itemtrace_st[dest_index].raw_t = v->tc[1];
++        gfx_itemtrace_st[dest_index].scaled_s = itemtrace_scaled_s;
++        gfx_itemtrace_st[dest_index].scaled_t = itemtrace_scaled_t;
+         
+         // Trivial-reject flags -- only meaningful for a PERSPECTIVE projection.
+         // An orthographic draw (screen-space skybox / HUD) has w==1 and
+@@ -2706,6 +2719,38 @@ static int pm_genshade_on(void) {
+ /* The generic draw's TEXEL1 follows TEXEL0's S/T: (s + a) * 2^k + c (gen_t1). pm_gen_setup notes k and whether
+  * both texels are read, for the per-triangle UV drop (gfx_emit_triangle, pm_uv_step). */
+ static int pm_t1_k[2], pm_t1_linked;
++extern void gfx_itemtrace_state(uint32_t omh, uint32_t oml, int edge, int ztest, int zupdate, int amin,
++                                const uint8_t *prim, const uint8_t *env);
++extern int gfx_itemtrace_active(void);
++extern int gfx_itemtrace_claim_st_chain(void);
++extern void gfx_itemtrace_bind_ci4(const uint8_t *src, uint32_t src_bytes, uint32_t stride, const uint8_t *tlut,
++                                   int w, int h, int ws, int wt, uint16_t tmem, bool ci4_raw);
++/* Capture the exact CI4 source descriptor already selected for TEXEL1.  The
++ * temporary descriptor is restored before returning; this is trace metadata,
++ * not a texture import or a rendering-state change. */
++static void pm_itemtrace_bind_t1(int t1i) {
++    __typeof__(rdp.texture_tile) saved = rdp.texture_tile;
++    const int saved_wide = pm_wide_tile;
++    rdp.texture_tile.fmt = pm_tiles[t1i].fmt; rdp.texture_tile.siz = pm_tiles[t1i].siz;
++    rdp.texture_tile.cms_raw = pm_tiles[t1i].cms; rdp.texture_tile.cmt_raw = pm_tiles[t1i].cmt;
++    rdp.texture_tile.masks = pm_tiles[t1i].masks; rdp.texture_tile.maskt = pm_tiles[t1i].maskt;
++    rdp.texture_tile.palette = pm_tiles[t1i].palette; rdp.texture_tile.line_size_bytes = pm_tiles[t1i].line * 8;
++    rdp.texture_tile.uls = pm_tiles[t1i].uls; rdp.texture_tile.ult = pm_tiles[t1i].ult;
++    rdp.texture_tile.lrs = pm_tiles[t1i].lrs; rdp.texture_tile.lrt = pm_tiles[t1i].lrt;
++    rdp.texture_tile.tmem = pm_tiles[t1i].tmem;
++    pm_render_tile_cm();
++    uint32_t width, height, src_bytes, stride;
++    gfx_tile_size(1, &width, &height);
++    const uint8_t *src = pm_tile_src(1, &src_bytes, &stride, NULL);
++    const uint8_t *tlut = pm_tlut[pm_tiles[t1i].palette & 15];
++    const uint8_t mirror = gfx_mirror_flags(width, height);
++    gfx_itemtrace_bind_ci4(src, src_bytes, stride, tlut, (int)width, (int)height,
++                           (int)pm_sampler_tile_axis(1, false, mirror & 1),
++                           (int)pm_sampler_tile_axis(1, true, mirror & 2), pm_tiles[t1i].tmem,
++                           mirror == 0 && !pm_wide_tile && pm_tiles[t1i].fmt == G_IM_FMT_CI && pm_tiles[t1i].siz == G_IM_SIZ_4b);
++    rdp.texture_tile = saved;
++    pm_wide_tile = saved_wide;
++}
+ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
+     pm_t1_linked = t0 && t1;
+     pm_t1_k[0] = pm_t1_k[1] = 0;
+@@ -2720,10 +2765,11 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
+             rdp.textures_changed[i] = false;
+         }
+         if (rendering_state.textures[i] != NULL) {
++            const int ti = i == 0 ? pm_prim_tile : (pm_prim_tile + 1) & 7;
+             gfx_rapi->select_texture(i, rendering_state.textures[i]->texture_id);
+             const uint8_t baked = rendering_state.textures[i]->mirror;
+             pm_set_sampler(i, false, pm_sampler_tile_axis(i, false, baked & 1),
+-                                     pm_sampler_tile_axis(i, true, baked & 2));
++                                             pm_sampler_tile_axis(i, true, baked & 2));
+         }
+     }
+     gfx_tex_stress_hold = 0;
+@@ -2735,6 +2781,8 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
+     const uint8_t prim[4] = { rdp.prim_color.r, rdp.prim_color.g, rdp.prim_color.b, rdp.prim_color.a };
+     const uint8_t env[4] = { rdp.env_color.r, rdp.env_color.g, rdp.env_color.b, rdp.env_color.a };
+     gfx_flush();
++    if (gfx_itemtrace_active() && rdp.pm_cc_w0 == 0xFFFFFFu && rdp.pm_cc_w1 == 0xFFFD7438u)
++        pm_itemtrace_bind_t1(t1i);
+     /* TEXEL1 from TEXEL0's S/T (gen_t1 in gfx_soft.c; round 16, R29): tile 1's own shift and corner, the corners
+      * with their quarter texels. PM64_T1SCALE=0: tile 0's scale and round 15's whole-texel offset. */
+     int32_t t1map[6] = { ds * 65536, 0, 0, dt * 65536, 0, 0 };
+@@ -2750,6 +2798,19 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
+     gfx_soft_pm_shroud(pm_shroud(), rdp.blend_color.r, rdp.blend_color.g, rdp.blend_color.b);
+     { extern bool gfx_soft_1cyc_t1; gfx_soft_1cyc_t1 = pm_1cyc_t1_on(); }
+     gfx_soft_pm_generic(true, rdp.pm_cc_w0, rdp.pm_cc_w1, two_cycle, prim, env, rdp.pm_prim_lod, ds, dt, t1map);
++    if (gfx_itemtrace_active() && rdp.pm_cc_w0 == 0xFFFFFFu && rdp.pm_cc_w1 == 0xFFFD7438u) {
++        const int t0i = pm_prim_tile;
++        const uint8_t *pal = pm_tlut[pm_tiles[t1i].siz == G_IM_SIZ_4b ? pm_tiles[t1i].palette & 15 : 0];
++        port_log("ITEM_TEXEL1 BIND tile0=%d fmt=%u siz=%u tmem=%u line=%u tile1=%d fmt=%u siz=%u tmem=%u line=%u palette_bank=%u tlut=%s shifts=%u,%u t1map=%d,%d,%d,%d,%d,%d\n",
++                 t0i,pm_tiles[t0i].fmt,pm_tiles[t0i].siz,pm_tiles[t0i].tmem,pm_tiles[t0i].line*8,
++                 t1i,pm_tiles[t1i].fmt,pm_tiles[t1i].siz,pm_tiles[t1i].tmem,pm_tiles[t1i].line*8,
++                 pm_tiles[t1i].palette & 15,pal ? "loaded" : "missing",pm_tiles[t1i].shifts,pm_tiles[t1i].shiftt,
++                 (int)t1map[0],(int)t1map[1],t1map[2],(int)t1map[3],(int)t1map[4],t1map[5]);
++        if (pal) port_log("ITEM_TEXEL1 TLUT16 raw=%02X%02X %02X%02X %02X%02X %02X%02X\n", pal[0],pal[1],pal[2],pal[3],pal[4],pal[5],pal[6],pal[7]);
++        gfx_itemtrace_state(rdp.other_mode_h, rdp.other_mode_l, (rdp.other_mode_l & CVG_X_ALPHA) != 0,
++                            (rdp.other_mode_l & Z_CMP) != 0, (rdp.other_mode_l & Z_UPD) != 0,
++                            (rdp.other_mode_l & CVG_X_ALPHA) ? 0x55 : 8, prim, env);
++    }
+     if (t1 && pm_tileshift_on() && !pm_t1scale_on() && (pm_tiles[t1i].shifts != pm_tiles[pm_prim_tile].shifts || pm_tiles[t1i].shiftt != pm_tiles[pm_prim_tile].shiftt)) {
+         static uint32_t sSeen[8][2]; static int sLogged; /* the generic path samples TEXEL1 at tile 0's scale: */
+         int i = 0;                                          /* say once per combine where a draw would want more */
+@@ -2955,17 +3016,19 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
+                 const uint32_t cms = rdp.texture_tile.cms, cmt = rdp.texture_tile.cmt;
+ #endif
+ #ifdef PM64
++                /* Another unit may share this cache node, so the node's last
++                 * modes alone do not describe this unit's current state. */
+                 pm_set_sampler(i, linear_filter, cms, cmt);
+                 rendering_state.textures[i]->linear_filter = linear_filter;
+                 rendering_state.textures[i]->cms = cms;
+                 rendering_state.textures[i]->cmt = cmt;
+ #else
+                 if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
+-                gfx_flush();
+-                gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
+-                rendering_state.textures[i]->linear_filter = linear_filter;
+-                rendering_state.textures[i]->cms = cms;
+-                rendering_state.textures[i]->cmt = cmt;
++                    gfx_flush();
++                    gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
++                    rendering_state.textures[i]->linear_filter = linear_filter;
++                    rendering_state.textures[i]->cms = cms;
++                    rendering_state.textures[i]->cmt = cmt;
+                 }
+ #endif
+             }
+@@ -3007,10 +3070,13 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
+         tex_width = (float) tw;
+         tex_height = (float) th;
+ #ifdef PM64
+-        /* Generic TEXEL1-only combines emit UVs for the SoftTex currently
+-         * bound at unit 1.  The rasterizer multiplies by that texture's
+-         * uploaded extent, so use the same extent here.  With no valid unit-1
+-         * binding, retain the established tile-0 frame. */
++        /* The generic TEXEL1-only path sends these UVs to the SoftTex bound at
++         * unit 1.  Use its actual uploaded extent: the rasterizer reconstructs
++         * uf/vf by multiplying the normalised UVs by that same extent.  Keep
++         * tile 0's origin and shift below; gen_t1() performs tile 1's relative
++         * corner and shift transform after interpolation.  A missing or invalid
++         * binding reports 0x0, in which case retain the established tile-0
++         * normalisation rather than introduce a zero-sized coordinate frame. */
+         if (pmg && !pmt0 && pmt1 && rendering_state.textures[1] != NULL) {
+             int bound_w, bound_h;
+             gfx_soft_tex_size(1, &bound_w, &bound_h);
+@@ -3210,7 +3276,6 @@ static inline void gfx_emit_vertex(const struct LoadedVertex *cv, uint32_t cc_id
+  * planes hundreds of times across single polygons). */
+ #define GFX_MAX_UV_REPEATS 16.0f
+ #ifdef PM64
+-extern void gfx_soft_tex_size(int tile, int *w, int *h);
+ static int pm_uvrebase_on(void) { static int s = -1; if (s < 0) { const char *e = getenv("PM64_UVREBASE"); s = !(e && e[0] == '0'); } return s; }
+ static int pm_uvdrop_on(void) { static int s = -1; if (s < 0) { const char *e = getenv("PM64_UVDROP"); s = !(e && e[0] == '0'); } return s; }
+ /* The drop for one axis in steps of base (1, or 2 for a doubled mirror) and of the smallest power of two L with
+@@ -3268,10 +3333,10 @@ static void gfx_emit_triangle(const struct LoadedVertex *a, const struct LoadedV
+     gfx_emit_vertex(a, cc_id, lod);
+     gfx_emit_vertex(b, cc_id, lod);
+     gfx_emit_vertex(c, cc_id, lod);
++    psp_fast_t *const first = &buf_vbo[buf_num_vert - 3];
+     if (tri_state.use_texture) {
+ #ifndef PORT_NO_UVDROP
+         // Drop the whole texture repeats shared by the three vertices (periodic under REPEAT).
+-        psp_fast_t *first = &buf_vbo[buf_num_vert - 3];
+         float minu = first[0].u, minv = first[0].v;
+         int i;
+         for (i = 1; i < 3; i++) {
+@@ -3306,6 +3371,38 @@ static void gfx_emit_triangle(const struct LoadedVertex *a, const struct LoadedV
+         }
+ #endif
+     }
++#ifdef PM64
++    /* Emit one record after any UV-repeat drop, i.e. from the exact SoftVtx
++     * values handed to the perspective rasterizer.  A clipped/interpolated
++     * source vertex is marked rather than reconstructed. */
++    if (gfx_itemtrace_active() && gfx_itemtrace_claim_st_chain()) {
++        const struct LoadedVertex *src[3] = { a, b, c };
++        const int t0 = pm_prim_tile, t1 = (pm_prim_tile + 1) & 7;
++        port_log("ITEM_TEXEL1_ST_CHAIN TRI tile0=%d fmt=%u siz=%u tmem=%u line=%u uls=%u ult=%u lrs=%u lrt=%u shift=%u,%u tile1=%d fmt=%u siz=%u tmem=%u line=%u uls=%u ult=%u lrs=%u lrt=%u shift=%u,%u scale_u16=%u,%u\n",
++                 t0, pm_tiles[t0].fmt, pm_tiles[t0].siz, pm_tiles[t0].tmem, pm_tiles[t0].line * 8,
++                 pm_tiles[t0].uls, pm_tiles[t0].ult, pm_tiles[t0].lrs, pm_tiles[t0].lrt, pm_tiles[t0].shifts, pm_tiles[t0].shiftt,
++                 t1, pm_tiles[t1].fmt, pm_tiles[t1].siz, pm_tiles[t1].tmem, pm_tiles[t1].line * 8,
++                 pm_tiles[t1].uls, pm_tiles[t1].ult, pm_tiles[t1].lrs, pm_tiles[t1].lrt, pm_tiles[t1].shifts, pm_tiles[t1].shiftt,
++                 rsp.texture_scaling_factor.s, rsp.texture_scaling_factor.t);
++        for (int i = 0; i < 3; i++) {
++            const uintptr_t p = (uintptr_t)src[i], lo = (uintptr_t)&rsp.loaded_vertices[0];
++            const size_t span = sizeof(rsp.loaded_vertices);
++            const bool loaded = p >= lo && p - lo < span && (p - lo) % sizeof(rsp.loaded_vertices[0]) == 0;
++            const size_t vi = loaded ? (size_t)((p - lo) / sizeof(rsp.loaded_vertices[0])) : 0;
++            const float uw = first[i].u * first[i].invw, vw = first[i].v * first[i].invw;
++            if (loaded) {
++                port_log("ITEM_TEXEL1_ST_CHAIN VERTEX n=%d raw_st_s10.5=%d,%d scaled_st_s10.5=%d,%d cv_st_s10.5=%d,%d clip_w=%.9g invw=%.9g emitted_uv_norm=%.9g,%.9g raster_uv_norm=%.9g,%.9g raster_uw_vw=%.9g,%.9g\n",
++                         i, gfx_itemtrace_st[vi].raw_s, gfx_itemtrace_st[vi].raw_t,
++                         gfx_itemtrace_st[vi].scaled_s, gfx_itemtrace_st[vi].scaled_t,
++                         (int)src[i]->u, (int)src[i]->v, src[i]->_w, first[i].invw,
++                         first[i].u, first[i].v, first[i].u, first[i].v, uw, vw);
++            } else {
++                port_log("ITEM_TEXEL1_ST_CHAIN VERTEX n=%d source=interpolated clip_w=%.9g invw=%.9g emitted_uv_norm=%.9g,%.9g raster_uv_norm=%.9g,%.9g raster_uw_vw=%.9g,%.9g\n",
++                         i, src[i]->_w, first[i].invw, first[i].u, first[i].v, first[i].u, first[i].v, uw, vw);
++            }
++        }
++    }
++#endif
+     buf_vbo_num_tris++;
+ }
+ 
+@@ -3926,17 +4023,19 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
+                 const uint32_t cms = rdp.texture_tile.cms, cmt = rdp.texture_tile.cmt;
+ #endif
+ #ifdef PM64
++                /* Another unit may share this cache node, so the node's last
++                 * modes alone do not describe this unit's current state. */
+                 pm_set_sampler(i, linear_filter, cms, cmt);
+                 rendering_state.textures[i]->linear_filter = linear_filter;
+                 rendering_state.textures[i]->cms = cms;
+                 rendering_state.textures[i]->cmt = cmt;
+ #else
+                 if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
+-                gfx_flush();
+-                gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
+-                rendering_state.textures[i]->linear_filter = linear_filter;
+-                rendering_state.textures[i]->cms = cms;
+-                rendering_state.textures[i]->cmt = cmt;
++                    gfx_flush();
++                    gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
++                    rendering_state.textures[i]->linear_filter = linear_filter;
++                    rendering_state.textures[i]->cms = cms;
++                    rendering_state.textures[i]->cmt = cmt;
+                 }
+ #endif
+             }
+diff --git a/paper-mario/bench/kit/gfx_soft.c b/paper-mario/bench/kit/gfx_soft.c
+index ab69b81..190af22 100644
+--- a/paper-mario/bench/kit/gfx_soft.c
++++ b/paper-mario/bench/kit/gfx_soft.c
+@@ -524,6 +524,100 @@ static struct {
+     int k1[4], k2[4], k3s[4]; /* fast paths: the second cycle's constants per channel, k3s = D << 8 */
+     int shroud, sh[3]; /* the shroud (gfx_pc.c pm_shroud): 5-bit factor (0 = none) and its tint colour */
+ } sGen SAVESTATE_EXCLUDE;
++/* The ItemEntity profile never changes a branch result.  It only counts the
++ * already chosen generic-combiner path while the one-shot trace is open. */
++static struct {
++    bool active;
++    bool st_chain_logged;
++    uint32_t states, tris;
++    uint64_t z_reject, alpha_reject, writes;
++    unsigned samples, alpha_samples;
++    uint8_t alpha_bins;
++    struct {
++        const uint8_t *src, *tlut;
++        uint32_t src_bytes, stride;
++        int w, h, ws, wt;
++        uint16_t tmem;
++        bool ci4_raw;
++    } ci4;
++} sItemTrace SAVESTATE_EXCLUDE;
++static inline int32_t gen_t1(int32_t x, int i);
++void gfx_itemtrace_begin(void) { memset(&sItemTrace, 0, sizeof(sItemTrace)); sItemTrace.active = true; }
++int gfx_itemtrace_active(void) { return sItemTrace.active; }
++static inline bool itemtrace_match(void) { return sItemTrace.active && sGen.on && sGen.w0 == 0xFFFFFFu && sGen.w1 == 0xFFFD7438u; }
++/* Logging gate for one fully emitted matching triangle.  It does not change
++ * the renderer's state, branches, sampler, or interpolation. */
++int gfx_itemtrace_claim_st_chain(void) {
++    if (!itemtrace_match() || sItemTrace.st_chain_logged) return 0;
++    sItemTrace.st_chain_logged = true;
++    return 1;
++}
++/* This records the already selected CI4 source for the active Item/TEXEL1 trace.
++ * It is metadata only: imports, sampler state, and the rasterizer remain unchanged. */
++void gfx_itemtrace_bind_ci4(const uint8_t *src, uint32_t src_bytes, uint32_t stride, const uint8_t *tlut,
++                            int w, int h, int ws, int wt, uint16_t tmem, bool ci4_raw) {
++    if (!sItemTrace.active) return;
++    sItemTrace.ci4.src = src; sItemTrace.ci4.src_bytes = src_bytes; sItemTrace.ci4.stride = stride;
++    sItemTrace.ci4.tlut = tlut; sItemTrace.ci4.w = w; sItemTrace.ci4.h = h;
++    sItemTrace.ci4.ws = ws; sItemTrace.ci4.wt = wt; sItemTrace.ci4.tmem = tmem;
++    sItemTrace.ci4.ci4_raw = ci4_raw;
++}
++static inline uint16_t itemtrace_be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
++static inline uint32_t itemtrace_rgba16(uint16_t c) {
++    const uint8_t r = (uint8_t)((c >> 11) & 31), g = (uint8_t)((c >> 6) & 31), b = (uint8_t)((c >> 1) & 31);
++    return argb((uint8_t)((r << 3) | (r >> 2)), (uint8_t)((g << 3) | (g >> 2)),
++                (uint8_t)((b << 3) | (b >> 2)), (c & 1) ? 255 : 0);
++}
++static void itemtrace_alpha_reject(int x, int y, int32_t uf, int32_t vf, int tw, int th, int ws, int wt,
++                                   int mu, int mv, uint32_t texel1, int fa, int amin, bool bilinear) {
++    if (!itemtrace_match()) return;
++    sItemTrace.alpha_reject++;
++    /* One deterministic 16x16 screen cell per quadrant avoids four adjacent edge samples. */
++    const unsigned bin = ((unsigned)x >> 4 & 1u) | (((unsigned)y >> 4 & 1u) << 1);
++    if (sItemTrace.alpha_samples >= 4 || (sItemTrace.alpha_bins & (1u << bin))) return;
++    sItemTrace.alpha_bins |= (uint8_t)(1u << bin);
++    sItemTrace.alpha_samples++;
++    const int32_t u1 = gen_t1(uf, 0), v1 = gen_t1(vf, 1);
++    const int32_t su = bilinear ? u1 - 0x8000 : u1, sv = bilinear ? v1 - 0x8000 : v1;
++    const int iu[4] = { wrapf(su >> 16, tw, ws, mu), wrapf((su >> 16) + (bilinear ? 1 : 0), tw, ws, mu),
++                        wrapf(su >> 16, tw, ws, mu), wrapf((su >> 16) + (bilinear ? 1 : 0), tw, ws, mu) };
++    const int iv[4] = { wrapf(sv >> 16, th, wt, mv), wrapf(sv >> 16, th, wt, mv),
++                        wrapf((sv >> 16) + (bilinear ? 1 : 0), th, wt, mv), wrapf((sv >> 16) + (bilinear ? 1 : 0), th, wt, mv) };
++    const int taps = bilinear ? 4 : 1;
++    port_log("ITEM_TEXEL1 ALPHA_REJECT_SAMPLE bin=%u x=%d y=%d uf=%d vf=%d t1f=%d,%d wrap=%d,%d tex=%dx%d wrap_mode=%d,%d tmem=%u filter=%s fa=%02X threshold=%02X texel1=%08X raw_ci4=%s\n",
++             bin, x, y, uf, vf, u1, v1, iu[0], iv[0], tw, th, ws, wt, (unsigned)sItemTrace.ci4.tmem,
++             bilinear ? "bilinear" : "nearest", fa, amin, texel1, sItemTrace.ci4.ci4_raw ? "available" : "unavailable");
++    for (int i = 0; i < taps; i++) {
++        const uint32_t at = (uint32_t)iv[i] * sItemTrace.ci4.stride + ((uint32_t)iu[i] >> 1);
++        if (!sItemTrace.ci4.ci4_raw || sItemTrace.ci4.src == NULL || sItemTrace.ci4.tlut == NULL || at >= sItemTrace.ci4.src_bytes) {
++            port_log("ITEM_TEXEL1 ALPHA_REJECT_TAP n=%d uv=%d,%d ci4=unavailable\n", i, iu[i], iv[i]);
++            continue;
++        }
++        const uint8_t ci4 = (sItemTrace.ci4.src[at] >> (4 - (iu[i] & 1) * 4)) & 15;
++        const uint16_t raw = itemtrace_be16(sItemTrace.ci4.tlut + ci4 * 2);
++        port_log("ITEM_TEXEL1 ALPHA_REJECT_TAP n=%d uv=%d,%d ci4=%u tlut16=%04X rgba=%08X\n",
++                 i, iu[i], iv[i], ci4, raw, itemtrace_rgba16(raw));
++    }
++}
++static inline void itemtrace_sample(int x, int y, int z, int fa, int fr, int fg, int fb) {
++    if (sItemTrace.samples++ < 4) port_log("ITEM_TEXEL1 PIXEL x=%d y=%d z=%d rgba=%02X%02X%02X%02X alpha_pass=1 z_pass=1 write=1\n", x, y, z, fr, fg, fb, fa);
++}
++void gfx_itemtrace_state(uint32_t omh, uint32_t oml, int edge, int ztest, int zupdate, int amin,
++                         const uint8_t *prim, const uint8_t *env) {
++    if (!itemtrace_match()) return;
++    sItemTrace.states++;
++    port_log("ITEM_TEXEL1 STATE combiner=FCFFFFFF FFFD7438 alpha_test=%d edge=%d threshold=%02X z_compare=%d z_update=%d om_h=%08X om_l=%08X prim=%02X%02X%02X%02X env=%02X%02X%02X%02X\n",
++             edge || amin > 0, edge, amin, ztest, zupdate, (unsigned)omh, (unsigned)oml,
++             prim[0],prim[1],prim[2],prim[3],env[0],env[1],env[2],env[3]);
++}
++void gfx_itemtrace_end(void) {
++    if (!sItemTrace.active) return;
++    port_log("ITEM_TEXEL1 SUMMARY states=%u tris=%u z_reject=%llu alpha_reject=%llu pixels_written=%llu samples=%u alpha_reject_samples=%u\n",
++             sItemTrace.states, sItemTrace.tris, (unsigned long long)sItemTrace.z_reject,
++             (unsigned long long)sItemTrace.alpha_reject, (unsigned long long)sItemTrace.writes, sItemTrace.samples > 4 ? 4 : sItemTrace.samples,
++             sItemTrace.alpha_samples);
++    sItemTrace.active = false;
++}
+ /* PM64_CENSUS=1: pixels per generic combine, 3D and 2D, printed at exit (round 16: which combines get fast paths). */
+ static int sGenCensus SAVESTATE_EXCLUDE = -1;
+ static struct { uint32_t w0, w1; uint8_t two, fast; uint64_t px3, px2; uint32_t draws; } sGenCs[64] SAVESTATE_EXCLUDE;
+@@ -617,7 +711,8 @@ void gfx_soft_pm_generic(bool on, uint32_t w0, uint32_t w1, bool two_cycle, cons
+     gen_classify_fast();
+ }
+ /* Rect UVs were rebased in tile 0 space. Restore that offset only for TEXEL1,
+- * before its relative shift; pm_gen_setup resets these fields for each draw. */
++ * before its relative shift; ds/dt also feed the TEXEL1-only and 2D fast paths.
++ * pm_gen_setup resets these fields for each draw. */
+ void gfx_soft_pm_rect_rebase(int s, int t) {
+     sGen.ds += s; sGen.dt += t;
+     sGen.t1a[0] = (int32_t)((uint32_t)sGen.t1a[0] + (uint32_t)s * 65536u);
+@@ -2009,15 +2104,18 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
+                         if (g1px && gt0) t1 = bilerp(g1px, g1_16, g1w, g1h, g1ws, g1wt, gen_t1(uf, 0), gen_t1(vf, 1), g1mu, g1mv);
+ #define GEN_COLOR_NEAREST                                                                              \
+                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_NEAREST                                      \
++                        itemtrace_t1 = t1;                                                               \
+                         const uint32_t c = pm_gen_eval(t0, t1, sr, sg, sb, sa);                         \
+                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
+ #define GEN_COLOR_BILINEAR                                                                             \
+                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_BILINEAR                                     \
++                        itemtrace_t1 = t1;                                                               \
+                         const uint32_t c = pm_gen_eval(t0, t1, sr, sg, sb, sa);                         \
+                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
+ /* The fast paths (gen_classify_fast), SMOOTH only: F is a constant in each span loop. */
+ #define GEN_FAST(BILIN, F)                                                                             \
+                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_##BILIN                                      \
++                        itemtrace_t1 = t1;                                                               \
+                         const uint32_t c = pm_gen_fast(F, t0, t1, sr, sg, sb, sa);                      \
+                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
+ #else
+@@ -2030,16 +2128,20 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
+  * out. Both bit-exact (MK64 perf round 24, via ocarina-of-time d267ca3). */
+ #define COLSTEP_0 , rq += rdq, gq += gdq, bq += bdq, aq += adq
+ #define COLSTEP_1
++#define ITEMTRACE_FILTER_NEAREST 0
++#define ITEMTRACE_FILTER_BILINEAR 1
++#define ITEMTRACE_FILTER_(x) ITEMTRACE_FILTER_##x
++#define ITEMTRACE_FILTER(x) ITEMTRACE_FILTER_(x)
+ #define SPAN_LOOP(TEX, ZTEST, ALPHA, BILIN) SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, 0, 0, 0)
+ #define SPAN_LOOP_G(TEX, ZTEST, ALPHA, BILIN, GEN) SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, GEN, 0, 0)
+ #define SPAN_LOOP_CM(TEX, ZTEST, ALPHA, BILIN, FLAT, CM) SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, 0, FLAT, CM)
+ #define SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, GEN, FLAT, CM)                                           \
+             for (int i = 0; i < span; i++, idx++, uf += duf, vf += dvf, zq += zdq COLSTEP_##FLAT) {     \
+                 const int uz = clamp16_sh8(zq);                                                         \
+-                if (ZTEST) { if (uz > zb[idx] + zbias) continue; }                                      \
++                if (ZTEST) { if (uz > zb[idx] + zbias) { if (itemtrace_match()) sItemTrace.z_reject++; continue; } } \
+                 const int sr = FLAT ? fsr : clamp8_sh16(rq), sg = FLAT ? fsg : clamp8_sh16(gq);         \
+                 const int sb = FLAT ? fsb : clamp8_sh16(bq), sa = FLAT ? fsa : clamp8_sh16(aq);         \
+-                int fr, fg, fb, fa;                                                                     \
++                int fr, fg, fb, fa; uint32_t itemtrace_t1 = 0;                                         \
+                 if (GEN == 1) { GEN_COLOR_##BILIN }                                                     \
+                 else if (GEN > 10) { GEN_FAST(BILIN, GEN - 10) }                                        \
+                 else if (TEX) {                                                                         \
+@@ -2059,7 +2161,7 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
+                     fa = !a_tex ? sa : (!a_in ? ta : div255(ta*sa));                                    \
+                 } else { fr=sr; fg=sg; fb=sb; fa=sa; }                                                  \
+                 if (ALPHA) {                                                                            \
+-                    if (fa < amin) continue;                                                            \
++                    if (fa < amin) { itemtrace_alpha_reject(idx % sW, idx / sW, uf, vf, tw, th, ws, wt, tmask_u, tmask_v, itemtrace_t1, fa, amin, ITEMTRACE_FILTER(BILIN)); continue; } \
+                     if (fa < 255 && ablend) {                                                           \
+                         const uint32_t d = fbuf[idx];                                                   \
+                         const int dr=(d>>16)&0xff, dg=(d>>8)&0xff, db=d&0xff;                           \
+@@ -2068,6 +2170,7 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
+                         fb = div255(fb*fa + db*(255-fa));                                               \
+                     }                                                                                   \
+                 }                                                                                       \
++                if (itemtrace_match()) { sItemTrace.writes++; itemtrace_sample(idx % sW, idx / sW, uz, fa, fr, fg, fb); } \
+                 fbuf[idx] = argb((uint8_t)fr,(uint8_t)fg,(uint8_t)fb,255);                              \
+                 if (ZTEST && dmask) zb[idx] = (uint16_t)uz;                                             \
+             }
+@@ -2276,6 +2379,7 @@ static void gfx_soft_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t
+     for (size_t i = 0; i < num_tris; i++) {
+         const int ppon = sPpX != -1 && pp_on(); const uint32_t ppb = ppon ? sFB[sPpY * sW + sPpX] : 0;
+         const int px = raster_tri(&v[i*3+0], &v[i*3+1], &v[i*3+2], true);
++        if (itemtrace_match()) sItemTrace.tris++;
+         if (ppon) pp_log("tri", ppb);
+ #ifdef PM64
+         if (sGen.on && sGenCensus != 0 && px > 0) gen_census_add((uint64_t) px, true);
+@@ -2412,7 +2516,7 @@ static void draw_2d_impl(float buf_vbo[], size_t buf_vbo_len, size_t num_sprites
+         const int texunit = gen && !sGen.t0 ? 1 : 0;
+         const int ws2 = tex ? soft_unit_wrap(texunit,tex,false) : 0, wt2 = tex ? soft_unit_wrap(texunit,tex,true) : 0;
+ #else
+-        const int ws2 = tex ? tex->wrap_s : 0, wt2 = tex ? tex->wrap_t : 0; /* pinned: the row[] stores are an aliasing barrier */
++        const int ws2 = tex ? tex->wrap_s : 0, wt2 = tex ? tex->wrap_t : 0;
+ #endif
+         const int32_t duf = tex ? to_fix16(dudx) : 0;
+         for (int y = cy0; y < cy1; y++) {
+@@ -2926,8 +3030,7 @@ void texman_clear(void) { sArenaUsed = 0; memset(sTex, 0, sizeof(sTex));
+ #ifdef PM64
+     memset(sUnitSampler, 0, sizeof(sUnitSampler));
+ #endif
+-    sNextTexId = 1;
+-}
++    sNextTexId = 1; }
+ 
+ /* Framebuffer readback (copy_framebuffer): the race-start wipe and the
+  * stadium TV screens ask for small patches of the PREVIOUS frame at N64
+diff --git a/paper-mario/game/port/port_gfx.c b/paper-mario/game/port/port_gfx.c
+index fa78305..1136962 100644
+--- a/paper-mario/game/port/port_gfx.c
++++ b/paper-mario/game/port/port_gfx.c
+@@ -7,6 +7,8 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/stat.h>
++#include <errno.h>
+ #include <PR/ultratypes.h>
+ #include <PR/gbi.h>
+ #include "gfx_pc.h"
+@@ -20,6 +22,7 @@
+ extern struct GfxRenderingAPI gfx_soft_api;
+ extern uint32_t *gfx_soft_get_framebuffer(int *w, int *h);
+ extern uint16_t gFrameBuf0[], gFrameBuf1[], gFrameBuf2[];
++extern const uint32_t port_build_stamp;
+ 
+ float identity_matrix[4][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } };
+ 
+@@ -277,6 +280,81 @@ static void depth_query_resolve(void) {
+     sDqN = 0;
+ }
+ 
++/* The menu arms the existing renderer trace, like the historical Quizmo menu.
++ * Unlike that 128-triangle window, wait for a swap task and capture its full
++ * existing TRILOG stream and matching framebuffer into a fresh directory. */
++static int sManualTrace SAVESTATE_EXCLUDE;
++static unsigned sManualSeq SAVESTATE_EXCLUDE;
++static unsigned sManualProfile SAVESTATE_EXCLUDE;
++static char sManualDir[512] SAVESTATE_EXCLUDE;
++static FILE *sManualLog SAVESTATE_EXCLUDE;
++extern int gfx_trace_frames;
++extern void port_trace_file(FILE *f);
++/* Profile 2 is deliberately observational: gfx_soft only counts decisions and
++ * gfx_pc only emits state already supplied to the renderer. */
++extern void gfx_itemtrace_begin(void);
++extern void gfx_itemtrace_end(void);
++enum { PM64_TRACE_GENERAL = 1, PM64_TRACE_ITEM_TEXEL1 = 2 };
++int pm64_qtrace_request_profile(unsigned profile) {
++    if (profile != PM64_TRACE_GENERAL && profile != PM64_TRACE_ITEM_TEXEL1) return 0;
++    if (sManualTrace || gfx_trace_frames) return 0;
++    sManualProfile = profile;
++    sManualTrace = 1;
++    return 1;
++}
++int pm64_qtrace_request(void) {
++    return pm64_qtrace_request_profile(PM64_TRACE_GENERAL);
++}
++static int manual_trace_begin(uint32_t frame) {
++    const char *base = getenv("PM64_TRACE_DIR");
++    if (!base || !*base) return 0;
++    for (int i = 0; i < 100000; i++) {
++        unsigned n = ++sManualSeq;
++        if (snprintf(sManualDir, sizeof sManualDir, "%s/trace_%06u", base, n) >= (int)sizeof sManualDir) return 0;
++        if (mkdir(sManualDir, 0755) == 0) break;
++        if (errno != EEXIST || i == 99999) return 0;
++    }
++    char path[600]; snprintf(path, sizeof path, "%s/trace.log", sManualDir);
++    sManualLog = fopen(path, "wx");
++    if (!sManualLog) return 0;
++    setvbuf(sManualLog, NULL, _IOLBF, 0);
++    port_trace_file(sManualLog);
++    port_log("RENDER_TRACE BEGIN seq=%u profile=%s app=PaperMarioPALDiagnostic build=PAL-0.4-DIAG build_stamp=%08X swap=%u game=%u task=swap\n",
++             sManualSeq, sManualProfile == PM64_TRACE_ITEM_TEXEL1 ? "item_texel1" : "general",
++             (unsigned) port_build_stamp, frame, port_frame);
++    if (sManualProfile == PM64_TRACE_ITEM_TEXEL1) gfx_itemtrace_begin();
++    { FILE *m; char meta[600];
++      snprintf(meta, sizeof meta, "%s/metadata.json", sManualDir);
++      m = fopen(meta, "wx");
++      if (m) { fprintf(m, "{\"trace_id\":%u,\"profile\":\"%s\",\"app\":\"PaperMarioPALDiagnostic\",\"build\":\"PAL-0.4-DIAG\",\"build_stamp\":\"%08X\",\"swap\":%u,\"game_frame\":%u,\"status\":\"started\"}\n", sManualSeq, sManualProfile == PM64_TRACE_ITEM_TEXEL1 ? "item_texel1" : "general", (unsigned) port_build_stamp, frame, port_frame); fclose(m); }
++    }
++    gfx_trace_frames = 1;
++    return 1;
++}
++static void manual_trace_end(uint32_t frame) {
++    char path[600]; snprintf(path, sizeof path, "%s/frame.ppm", sManualDir);
++    FILE *f = fopen(path, "wx");
++    int w=0, h=0, ok=0;
++    const uint32_t *fb = gfx_soft_get_framebuffer(&w, &h);
++    if (f && fb && w == 320 && h == 240) {
++        ok = fprintf(f, "P6\n%d %d\n255\n", w, h) > 0;
++        for (int y=0; y<h && ok; y++) for (int x=0; x<w; x++) {
++            uint32_t p=fb[y*w+x]; unsigned char rgb[3]={p>>16,p>>8,p};
++            if (fwrite(rgb, 1, 3, f) != 3) { ok=0; break; }
++        }
++    }
++    if (f && fclose(f)) ok=0;
++    if (sManualProfile == PM64_TRACE_ITEM_TEXEL1) gfx_itemtrace_end();
++    port_log("RENDER_TRACE END seq=%u profile=%s swap=%u game=%u ppm=%s task_complete=%d\n", sManualSeq,
++             sManualProfile == PM64_TRACE_ITEM_TEXEL1 ? "item_texel1" : "general", frame, port_frame, ok ? "ok" : "error", gfx_trace_frames == 0);
++    { FILE *m; char meta[600];
++      snprintf(meta, sizeof meta, "%s/metadata.json", sManualDir);
++      m = fopen(meta, "w");
++      if (m) { fprintf(m, "{\"trace_id\":%u,\"profile\":\"%s\",\"app\":\"PaperMarioPALDiagnostic\",\"build\":\"PAL-0.4-DIAG\",\"build_stamp\":\"%08X\",\"swap\":%u,\"game_frame\":%u,\"trace\":\"trace.log\",\"framebuffer\":\"frame.ppm\",\"status\":\"%s\"}\n", sManualSeq, sManualProfile == PM64_TRACE_ITEM_TEXEL1 ? "item_texel1" : "general", (unsigned) port_build_stamp, frame, port_frame, ok && gfx_trace_frames == 0 ? "complete" : "error"); fclose(m); }
++    }
++    port_trace_file(NULL); fclose(sManualLog); sManualLog=NULL; sManualTrace=0;
++}
++
+ void port_gfx_task(void *gfx_list, int swap) {
+     /* PM64_TRACE_AT=<frame>[,<tasks>]: the renderer's command trace (PM64_TRILOG=1 adds every triangle) for that
+      * frame's tasks, frames counted as the shots are (the file select's window flip, M2) */
+@@ -299,11 +377,18 @@ void port_gfx_task(void *gfx_list, int swap) {
+         gfx_trace_frames = (int) sTraceN;
+         sTraceAt = 0;
+     }
++    const uint32_t manualFrame = sFrame;
++    int manual = 0;
++    if (swap && sManualTrace && !gfx_trace_frames) {
++        manual = manual_trace_begin(manualFrame);
++        if (!manual) { sManualTrace = 0; port_log("RENDER_TRACE ERROR cannot create trace output\n"); }
++    }
+     if (swap) sFrame++;
+     const uint32_t perfT0 = port_time_us();
+     gfx_start_frame();
+     gfx_run((Gfx *) gfx_list);
+     gfx_end_frame();
++    if (manual) manual_trace_end(manualFrame);
+     if (!swap) { port_perf_gfx_us += port_time_us() - perfT0; return; }
+ #ifdef PM64_SDL12
+     port_video_present();
+diff --git a/paper-mario/game/port/port_host.c b/paper-mario/game/port/port_host.c
+index 1467160..a5643a4 100644
+--- a/paper-mario/game/port/port_host.c
++++ b/paper-mario/game/port/port_host.c
+@@ -179,6 +179,8 @@ const char *port_eboot_dir(void) {
+ 
+ /* stderr and, on the device, console.log in the save dir (read it when the card comes back) */
+ static FILE *sLogFile;
++static FILE *sTraceFile SAVESTATE_EXCLUDE;
++void port_trace_file(FILE *f) { sTraceFile = f; }
+ #if defined(MIYOO)
+ static int sLogDup; /* console.log is stderr (see vlog) */
+ #endif
+@@ -186,6 +188,7 @@ static volatile int sLogFd = -1; /* console.log's descriptor, for the crash line
+ static void vlog(const char *fmt, va_list ap) {
+     va_list ap2;
+     va_copy(ap2, ap);
++    if (sTraceFile) { va_list at; va_copy(at, ap); vfprintf(sTraceFile, fmt, at); va_end(at); }
+     vfprintf(stderr, fmt, ap);
+ #ifdef PM64_SDL12
+     if (!sLogFile && !sLogDup) {
+diff --git a/paper-mario/kit/platform/miyoo_menu.c b/paper-mario/kit/platform/miyoo_menu.c
+index 7f40f37..eafaacf 100644
+--- a/paper-mario/kit/platform/miyoo_menu.c
++++ b/paper-mario/kit/platform/miyoo_menu.c
+@@ -42,12 +42,21 @@ extern void gfx_sdl12_set_res_dynamic(int on);
+ extern void gfx_sdl12_set_res_pct(int pct);
+ extern int gfx_soft_bilinear, gfx_soft_magbilin;
+ extern void port_request_exit(void);
++#ifdef PM64
++extern int pm64_qtrace_request(void);
++extern int pm64_qtrace_request_profile(unsigned profile);
++#endif
+ extern void port_audio_out_set_muted(int muted);
+ extern uint32_t *gfx_soft_get_framebuffer(int *w, int *h);
+ extern void controller_handheld_key(int sym, int down) __attribute__((weak));
+ 
++#ifdef PM64
++enum { I_RESUME, I_SAVE, I_LOAD, I_CONTROLS, I_TRACE, I_ITEM_TRACE, I_EXIT, I_COUNT };
++static const char *ITEM[I_COUNT] = { "RESUME", "SAVE STATE", "LOAD STATE", "CONTROLS", "RENDER TRACE", "ITEM/TEXEL1 TRACE", "EXIT GAME" };
++#else
+ enum { I_RESUME, I_SAVE, I_LOAD, I_CONTROLS, I_EXIT, I_COUNT };
+ static const char *ITEM[I_COUNT] = { "RESUME", "SAVE STATE", "LOAD STATE", "CONTROLS", "EXIT GAME" };
++#endif
+ #define SLOT_MIN 1
+ #define SLOT_MAX 9
+ 
+@@ -171,7 +180,7 @@ static void compose_menu(int cur, int confirm) {
+     text_centered(sDraw, py + 34, 3, HH_GAME_TITLE, C_TEXT);
+     fill(sDraw, px + 30, py + 62, pw - 60, 2, C_EDGE);
+     for (int i = 0; i < I_COUNT; i++) {
+-        const int cy = py + 100 + i * 44;
++        const int cy = py + 92 + i * (I_COUNT >= 6 ? 35 : 44);
+         if (i == cur) fill(sDraw, px + 20, cy - 18, pw - 40, 36, 0xFF283038u);
+         text_centered(sDraw, cy, 3, ITEM[i], i == cur ? C_SEL : C_TEXT);
+     }
+@@ -310,6 +319,10 @@ void handheld_menu_run(struct SDL_Surface *screen_) {
+             case SDLK_RETURN: /* START */
+                 if (cur == I_RESUME) running = 0;
+                 else if (cur == I_CONTROLS) { sRemapScreen = screen; miyoo_remap_screen(sDraw, sBackup, remap_show, remap_key, remap_close); confirm = 0; dirty = 1; }
++#ifdef PM64
++                else if (cur == I_TRACE) { handheld_menu_notify(pm64_qtrace_request() ? "TRACE ARMED" : "TRACE UNAVAILABLE"); running = 0; }
++                else if (cur == I_ITEM_TRACE) { handheld_menu_notify(pm64_qtrace_request_profile(2) ? "ITEM TRACE ARMED" : "TRACE UNAVAILABLE"); running = 0; }
++#endif
+                 else if (cur == I_SAVE) {
+                     if (confirm || !savestate_slot_valid(sSlot)) { savestate_request_save(sSlot); running = 0; }
+                     else { confirm = 1; dirty = 1; }

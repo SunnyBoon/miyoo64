@@ -27,6 +27,8 @@ The SoftTex change is restricted to generic TEXEL1-only draws with a valid unit-
 
 The user supplies the canonical big-endian Paper Mario (Europe, PAL) ROM with SHA-1 `2111d39265a317414d359e35a7d971c4dfa5f9e1`. It is only a local, read-only build input. The packages contain the executable and numeric recipe table, never the ROM, `assets.bin`, extracted game assets, personal saves, or test evidence.
 
+The Diagnostic binary starts from the same release commit and applies the tracked `miyoo/pal-alpha-0.4-diagnostic-overlay.patch` in an isolated build tree before compiling. The overlay is restricted to the pre-existing M1.7 trace capture, item/TEXEL1 observation, trace-file tee, and two menu entries; it has no Save-RAM, asset, game, or rendering-fix change. Its trace metadata identifies `PaperMarioPALDiagnostic`, `PAL-0.4-DIAG`, and the linked binary's runtime build stamp. The package manifest binds that binary to its SHA-256; no runtime hash is invented.
+
 `tools/port/pal_build.py` produces a fresh asset/recipe pair for every final link. `tools/port/pal_release_gates.py` verifies the ELF, asset region, relocation targets, Recipe cache/stamp, package structure, and ROM-content leakage. A successful static gate is not a hardware acceptance.
 
 ## Diagnostic save-file handling
