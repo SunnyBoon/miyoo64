@@ -2560,6 +2560,7 @@ uint32_t gfx_prof_rebuilds;
 extern void gfx_soft_pm_generic(bool on, uint32_t w0, uint32_t w1, bool two_cycle, const uint8_t prim[4], const uint8_t env[4],
                                 uint8_t prim_lod, int ds, int dt, const int32_t t1map[6]);
 extern void gfx_soft_tex_size(int tile, int *w, int *h);
+extern void gfx_soft_pm_rect_rebase(int s, int t);
 enum { M_COMB, M_T0, M_T1, M_PRIM, M_SHADE, M_ENV, M_ONE, M_ZERO, M_OTHER };
 static int pm_mux_rgb_ab(int v, bool is_b) { return v <= 5 ? v : v == 6 ? (is_b ? M_OTHER : M_ONE) : v == 7 ? M_OTHER : M_ZERO; }
 static int pm_mux_rgb_c(int v) { return v <= 5 ? v : v == 8 ? 100 /* T0 alpha */ : v >= 16 ? M_ZERO : M_OTHER; }
@@ -4032,6 +4033,9 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
         gfx_eval_vertex_color(cc_id, &v_arr[i]->color, 0, &tri_buf[tri_num_vert].color);
         tri_num_vert++;
     }
+#ifdef PM64
+    if (pmg && pmt1) gfx_soft_pm_rect_rebase(pm_su, pm_sv);
+#endif
     if (gfx_trace_frames > 0) port_log("  2d: draw (%d,%d)-(%d,%d)\n", tri_buf[0].x, tri_buf[0].y, tri_buf[1].x, tri_buf[1].y);
     gfx_scegu_draw_triangles_2d((float*)&tri_buf[0],0,1);
     if (gfx_trace_frames > 0) port_log("  2d: drawn\n");
@@ -4369,6 +4373,11 @@ static uint32_t gfx_texture_image_offset(uint32_t s, uint32_t t) {
     }
 }
 
+#ifdef PM64
+static inline uint32_t pm_zero_mask_cm(uint32_t cm, uint32_t mask) {
+    return mask ? cm : ((cm & ~G_TX_MIRROR) | G_TX_CLAMP);
+}
+#endif
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, UNUSED uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
     if (tile == G_TX_RENDERTILE) {
         tri_state.valid = false;
@@ -4385,8 +4394,8 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
 #ifdef PM64
     /* A zero mask does not wrap on the RDP: it clamps (ocarina-of-time 8674501). Paper Mario's
      * text glyphs are G_TX_WRAP + G_TX_NOMASK; repeating them bled the opposite edge in. */
-    if (masks == 0) cms |= G_TX_CLAMP;
-    if (maskt == 0) cmt |= G_TX_CLAMP;
+    cms = pm_zero_mask_cm(cms, masks);
+    cmt = pm_zero_mask_cm(cmt, maskt);
     pm_tiles[tile & 7].fmt = fmt; pm_tiles[tile & 7].siz = siz; pm_tiles[tile & 7].cms = cms; pm_tiles[tile & 7].cmt = cmt;
     pm_tiles[tile & 7].palette = palette; pm_tiles[tile & 7].tmem = tmem; pm_tiles[tile & 7].line = line;
     pm_tiles[tile & 7].masks = (uint8_t) masks; pm_tiles[tile & 7].maskt = (uint8_t) maskt;
