@@ -59,11 +59,13 @@ void port_segment_loaded(int seg, uint32_t rom_start) {
 }
 
 /* KZN animation segments are linked as native s16 data, but the boss explicitly
- * DMAs them into one of four private buffers. Preserve ordinary overlay DMAs. */
+ * DMAs them into a battle or overworld vine buffer. Preserve ordinary overlay DMAs. */
 extern unsigned char Vine0Base[], Vine1Base[], Vine2Base[], Vine3Base[];
+extern unsigned char D_80200000[], D_80204000[], D_80207000[], D_8020A000[];
 int port_vine_dma(int seg, uint32_t rom, void *dst, uint32_t size) {
     static const struct { unsigned char *base; uint32_t size; } vines[] = {
-        { Vine0Base, 0x4000 }, { Vine1Base, 0x3000 }, { Vine2Base, 0x3000 }, { Vine3Base, 0x2000 }
+        { Vine0Base, 0x4000 }, { Vine1Base, 0x3000 }, { Vine2Base, 0x3000 }, { Vine3Base, 0x2000 },
+        { D_80200000, 0x4000 }, { D_80204000, 0x3000 }, { D_80207000, 0x3000 }, { D_8020A000, 0x6000 }
     };
     if (seg < 0 || seg >= port_code_segs_n) return 0;
     const char *name = port_code_segs[seg].name;

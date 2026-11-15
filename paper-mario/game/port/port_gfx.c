@@ -379,7 +379,11 @@ int pm64_diag_stop_request(void) {
 int pm64_qtrace_request(void) { return pm64_diag_request(PM64_DIAG_RAW_COMPAT); }
 int pm64_qtrace_request_profile(unsigned profile) { (void) profile; return pm64_diag_request(PM64_DIAG_RENDER_FOCUS); }
 
-#if defined(PM64_VINE_FIX_M25)
+#if defined(PM64_VINE_FIX_M26)
+#define DIAG_SESSION_PREFIX "m26"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045VineFixM26"
+#define DIAG_BUILD_NAME "PAL-0.4.5-VINE-FIX-M26"
+#elif defined(PM64_VINE_FIX_M25)
 #define DIAG_SESSION_PREFIX "m25"
 #define DIAG_APP_NAME "PaperMarioPALAlpha045VineFixM25"
 #define DIAG_BUILD_NAME "PAL-0.4.5-VINE-FIX-M25"
