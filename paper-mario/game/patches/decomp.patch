@@ -2330,6 +2330,68 @@ index 464832287..3b69f8641 100644
  #endif
  
      create_cameras();
+diff --git a/src/world/area_dro/dro_02/npc_merlee.c b/src/world/area_dro/dro_02/npc_merlee.c
+index 8e4431ed4..5541b054f 100644
+--- a/src/world/area_dro/dro_02/npc_merlee.c
++++ b/src/world/area_dro/dro_02/npc_merlee.c
+@@ -209,6 +209,16 @@ u32 N(appendGfx_ritual_card)(RitualCard* card, Matrix4f mtxParent) {
+     SpriteRasterInfo rasterInfo;
+     s32 ret;
+ 
++    /* The first three effects use the 32x32 card texture already loaded by
++     * card_setup_gfx. Their animation data uses absolute coordinates. */
++    ifxImg.raster = dro_02_card;
++    ifxImg.palette = dro_02_card_pal;
++    ifxImg.width = 32;
++    ifxImg.height = 32;
++    ifxImg.xOffset = 0;
++    ifxImg.yOffset = 0;
++    ifxImg.alpha = 255;
++
+     if (card->unk_00 == 0) {
+         return 1;
+     }
+@@ -253,6 +263,10 @@ u32 N(appendGfx_ritual_card)(RitualCard* card, Matrix4f mtxParent) {
+         guMtxF2L(mtxTransform, &gDisplayContext->matrixStack[gMatrixListPos]);
+         gSPMatrix(gMainGfxPos++, VIRTUAL_TO_PHYSICAL(&gDisplayContext->matrixStack[gMatrixListPos++]), G_MTX_PUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+         ret = imgfx_appendGfx_component(evt_get_variable(N(CreatorScript), RITUAL_VAR_SHUFFLE_IMGFX), &ifxImg, IMGFX_FLAG_SKIP_GFX_SETUP | IMGFX_FLAG_SKIP_TEX_SETUP, mtxTransform);
++        {
++            extern void port_merlee_sample(s32 state, s32 cardState, s32 phase, s32 alpha, s32 width, s32 height, s32 x, s32 y, s32 result);
++            port_merlee_sample(evt_get_variable(N(CreatorScript), RITUAL_VAR_STATE), card->unk_00, 2, ifxImg.alpha, ifxImg.width, ifxImg.height, ifxImg.xOffset, ifxImg.yOffset, ret);
++        }
+         gSPPopMatrix(gMainGfxPos++, G_MTX_MODELVIEW);
+         return ret;
+     }
+@@ -263,8 +277,16 @@ u32 N(appendGfx_ritual_card)(RitualCard* card, Matrix4f mtxParent) {
+         guMtxCatF(mtxTemp, mtxParent, mtxTransform);
+         guMtxF2L(mtxTransform, &gDisplayContext->matrixStack[gMatrixListPos]);
+         gSPMatrix(gMainGfxPos++, VIRTUAL_TO_PHYSICAL(&gDisplayContext->matrixStack[gMatrixListPos++]), G_MTX_PUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+-        imgfx_appendGfx_component(evt_get_variable(N(CreatorScript), RITUAL_VAR_FILP1_IMGFX), &ifxImg, IMGFX_FLAG_SKIP_GFX_SETUP | IMGFX_FLAG_SKIP_TEX_SETUP, mtxTransform);
+-        imgfx_appendGfx_component(evt_get_variable(N(CreatorScript), RITUAL_VAR_FILP2_IMGFX), &ifxImg, IMGFX_FLAG_SKIP_GFX_SETUP | IMGFX_FLAG_SKIP_TEX_SETUP, mtxTransform);
++        ret = imgfx_appendGfx_component(evt_get_variable(N(CreatorScript), RITUAL_VAR_FILP1_IMGFX), &ifxImg, IMGFX_FLAG_SKIP_GFX_SETUP | IMGFX_FLAG_SKIP_TEX_SETUP, mtxTransform);
++        {
++            extern void port_merlee_sample(s32 state, s32 cardState, s32 phase, s32 alpha, s32 width, s32 height, s32 x, s32 y, s32 result);
++            port_merlee_sample(evt_get_variable(N(CreatorScript), RITUAL_VAR_STATE), card->unk_00, 31, ifxImg.alpha, ifxImg.width, ifxImg.height, ifxImg.xOffset, ifxImg.yOffset, ret);
++        }
++        ret = imgfx_appendGfx_component(evt_get_variable(N(CreatorScript), RITUAL_VAR_FILP2_IMGFX), &ifxImg, IMGFX_FLAG_SKIP_GFX_SETUP | IMGFX_FLAG_SKIP_TEX_SETUP, mtxTransform);
++        {
++            extern void port_merlee_sample(s32 state, s32 cardState, s32 phase, s32 alpha, s32 width, s32 height, s32 x, s32 y, s32 result);
++            port_merlee_sample(evt_get_variable(N(CreatorScript), RITUAL_VAR_STATE), card->unk_00, 32, ifxImg.alpha, ifxImg.width, ifxImg.height, ifxImg.xOffset, ifxImg.yOffset, ret);
++        }
+         gSPPopMatrix(gMainGfxPos++, G_MTX_MODELVIEW);
+         guTranslateF(mtxTemp, N(RitualCards)[0].pos.x, N(RitualCards)[0].pos.y, N(RitualCards)[0].pos.z);
+         guMtxCatF(mtxTemp, mtxParent, mtxTransform);
+@@ -577,6 +599,10 @@ void N(card_worker_render)(void) {
+     N(appendGfx_ritual_card)(&N(RitualCards)[2], mtx);
+     if ((N(RitualCards)[0].unk_00 == 2) && ((temp_s1 - 1) < 2)) {
+         evt_set_variable(N(CreatorScript), RITUAL_VAR_STATE, RITUAL_STATE_3);
++        {
++            extern void port_merlee_sample(s32 state, s32 cardState, s32 phase, s32 alpha, s32 width, s32 height, s32 x, s32 y, s32 result);
++            port_merlee_sample(RITUAL_STATE_3, N(RitualCards)[0].unk_00, 3, -1, -1, -1, -1, -1, temp_s1);
++        }
+     }
+     if ((N(RitualCards)[0].unk_00 == 3) && ((temp_s1 - 1) < 2)) {
+         evt_set_variable(N(CreatorScript), RITUAL_VAR_STATE, RITUAL_STATE_B);
 diff --git a/src/world/area_end/common/Credits.inc.c b/src/world/area_end/common/Credits.inc.c
 index a92b3ba3a..83c920126 100644
 --- a/src/world/area_end/common/Credits.inc.c

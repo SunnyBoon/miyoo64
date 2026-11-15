@@ -305,6 +305,17 @@ static struct {
 } sDiag SAVESTATE_EXCLUDE;
 int pm64_diag_event_pending SAVESTATE_EXCLUDE;
 static struct { unsigned count; struct PM64ProbeRow rows[PM64_PROBE_LIMIT]; } sProbe SAVESTATE_EXCLUDE;
+/* Merlee fix candidate: bounded observations, written only at TIMELINE end. */
+static struct { unsigned count, dropped, next; struct { unsigned frame; int state, card, phase, alpha, width, height, x, y, result; } row[64]; } sMerlee SAVESTATE_EXCLUDE;
+void port_merlee_sample(int state, int card, int phase, int alpha, int width, int height, int x, int y, int result) {
+    if (!sDiag.active || sDiag.mode != PM64_DIAG_TIMELINE) return;
+    unsigned i = sMerlee.next++ % 64;
+    if (sMerlee.count < 64) sMerlee.count++; else sMerlee.dropped++;
+    sMerlee.row[i].frame = port_frame;
+    sMerlee.row[i].state = state; sMerlee.row[i].card = card; sMerlee.row[i].phase = phase;
+    sMerlee.row[i].alpha = alpha; sMerlee.row[i].result = result;
+    sMerlee.row[i].width = width; sMerlee.row[i].height = height; sMerlee.row[i].x = x; sMerlee.row[i].y = y;
+}
 int pm64_probe_active(void) { return sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sProbe.count < PM64_PROBE_LIMIT; }
 void pm64_probe_store(const struct PM64ProbeRow *row) {
     if (!pm64_probe_active() || !row) return;
@@ -379,7 +390,11 @@ int pm64_diag_stop_request(void) {
 int pm64_qtrace_request(void) { return pm64_diag_request(PM64_DIAG_RAW_COMPAT); }
 int pm64_qtrace_request_profile(unsigned profile) { (void) profile; return pm64_diag_request(PM64_DIAG_RENDER_FOCUS); }
 
-#if defined(PM64_VINE_FIX_M26)
+#if defined(PM64_MERLEE_FIX_TEST)
+#define DIAG_SESSION_PREFIX "merlee-test"
+#define DIAG_APP_NAME "PaperMarioPALMerleeFixTest"
+#define DIAG_BUILD_NAME "PAL-0.4.5-MERLEE-FIX-TEST"
+#elif defined(PM64_VINE_FIX_M26)
 #define DIAG_SESSION_PREFIX "m26"
 #define DIAG_APP_NAME "PaperMarioPALAlpha045VineFixM26"
 #define DIAG_BUILD_NAME "PAL-0.4.5-VINE-FIX-M26"
@@ -442,6 +457,7 @@ static int diag_begin(uint32_t swap) {
         }
     } else { sDiag.group[0] = 0; snprintf(sDiag.role, sizeof sDiag.role, "manual"); }
     if (sDiag.mode == PM64_DIAG_TIMELINE) {
+        memset(&sMerlee, 0, sizeof sMerlee);
         boss_diag_arm();
         animator_profile_arm(sDiag.reload_generation);
         memset(&sProbe, 0, sizeof sProbe);
@@ -620,6 +636,13 @@ static void diag_animator_write(void) {
 static void diag_end_ex(uint32_t swap, const char *reason, int screenshot) {
     const int ok = screenshot ? diag_screenshot() : 0;
     if (sDiag.mode == PM64_DIAG_TIMELINE) {
+        if (sDiag.log) {
+            fprintf(sDiag.log, "MERLEE variant=fix count=%u dropped=%u limit=64\n", sMerlee.count, sMerlee.dropped);
+            for (unsigned j = 0; j < sMerlee.count; j++) {
+                unsigned i = (sMerlee.next - sMerlee.count + j) % 64;
+                fprintf(sDiag.log, "MERLEE frame=%u state=%d card_index=0 card=%d phase=%d alpha=%d width=%d height=%d x=%d y=%d result=%d\n", sMerlee.row[i].frame, sMerlee.row[i].state, sMerlee.row[i].card, sMerlee.row[i].phase, sMerlee.row[i].alpha, sMerlee.row[i].width, sMerlee.row[i].height, sMerlee.row[i].x, sMerlee.row[i].y, sMerlee.row[i].result);
+            }
+        }
         diag_boss_write();
         diag_animator_write();
         pm64_probe_write();
