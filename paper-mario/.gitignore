@@ -38,6 +38,7 @@
 !tools/port/fill_test.c
 !tools/port/nearw_test.c
 !tools/port/clock_test.c
+!tools/port/boss_diag_test.c
 !tools/assets/*.py
 !tools/assets/recipes_handheld.json
 !miyoo/icon.svg
@@ -75,5 +76,7 @@ build/
 
 # Region-specific source/package metadata; derived PAL recipes remain in build/.
 !miyoo/game-pal.json
+!miyoo/game-pal-alpha045-boss-diag-m24.json
+!miyoo/README-PAL-ALPHA-0.4.5-BOSS-DIAG-M24.txt
 !PAL_ALPHA.md
 !.gitattributes

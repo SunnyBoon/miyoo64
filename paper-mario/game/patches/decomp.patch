@@ -841,6 +841,102 @@ index 86d6340df..19f8903ed 100644
                  src++;
                  dest++;
  
+diff --git a/src/battle/area/kzn2/actor/lava_piranha.c b/src/battle/area/kzn2/actor/lava_piranha.c
+index fef58ecc5..41eef7e85 100644
+--- a/src/battle/area/kzn2/actor/lava_piranha.c
++++ b/src/battle/area/kzn2/actor/lava_piranha.c
+@@ -333,6 +333,52 @@ void N(make_vine_interpolation)(LavaPiranhaVine* vine) {
+     vine->numPoints = count;
+ }
+ 
++#ifdef PM64_PORT
++extern unsigned int port_frame;
++extern void boss_diag_begin(const void*, s32, unsigned);
++extern void boss_diag_select(const void*, s32, unsigned);
++extern void boss_diag_unselect(void);
++extern void boss_diag_position(const void*, s32, unsigned, const float*);
++extern int boss_diag_wants(const void*, s32, unsigned);
++extern void boss_diag_fail(void);
++extern void boss_diag_check_frame(unsigned);
++
++/* These wrappers occur only at the two specific calls in EVS_InitVines. */
++API_CALLABLE(N(DiagHeadNode)) {
++    ApiStatus result;
++    if (script->ptrFirstLine == N(EVS_InitVines)) {
++        boss_diag_begin(script, script->id, port_frame);
++        boss_diag_select(script, script->id, 1);
++    }
++    result = GetAnimatedPositionByTreeIndex(script, isInitialCall);
++    boss_diag_unselect();
++    return result;
++}
++API_CALLABLE(N(DiagVineNode)) {
++    ApiStatus result;
++    if (script->ptrFirstLine == N(EVS_InitVines)) {
++        boss_diag_check_frame(port_frame);
++        boss_diag_select(script, script->id, 3);
++    }
++    result = GetAnimatedPositionByTreeIndex(script, isInitialCall);
++    boss_diag_unselect();
++    return result;
++}
++API_CALLABLE(N(DiagHeadPosition)) {
++    ApiStatus result = SetPartPos(script, isInitialCall);
++    if (script->ptrFirstLine == N(EVS_InitVines)) boss_diag_check_frame(port_frame);
++    if (script->ptrFirstLine == N(EVS_InitVines) && boss_diag_wants(script, script->id, 2)) {
++        Actor* actor = get_actor(ACTOR_BOSS);
++        ActorPart* part = get_actor_part(actor, PRT_MAIN);
++        if (part->flags & ACTOR_PART_FLAG_USE_ABSOLUTE_POSITION) {
++            float pos[3] = {part->absolutePos.x, part->absolutePos.y, part->absolutePos.z};
++            boss_diag_position(script, script->id, 2, pos);
++        } else boss_diag_fail();
++    }
++    return result;
++}
++#endif
++
+ API_CALLABLE(N(SetVineBonePos)) {
+     Bytecode* args = script->ptrReadPos;
+     s32 vineIdx = evt_get_variable(script, *args++);
+@@ -345,6 +391,13 @@ API_CALLABLE(N(SetVineBonePos)) {
+     vine->bonePos[jointIdx].x = x;
+     vine->bonePos[jointIdx].y = y;
+     vine->bonePos[jointIdx].z = z;
++#ifdef PM64_PORT
++    if (script->ptrFirstLine == N(EVS_InitVines) && vineIdx == VINE_0 && jointIdx == 0) {
++        boss_diag_check_frame(port_frame);
++        float pos[3] = { vine->bonePos[0].x, vine->bonePos[0].y, vine->bonePos[0].z };
++        boss_diag_position(script, script->id, 4, pos);
++    }
++#endif
+     return ApiStatus_DONE2;
+ }
+ 
+@@ -757,15 +810,24 @@ EvtScript N(EVS_InitVines) = {
+     Label(0)
+         // ---------------------------------------------------------------
+         // set ACTOR_BOSS position and orientation to tip of VINE_0
++#ifdef PM64_PORT
++        Call(N(DiagHeadNode), VINE_0, 10, LVar0, LVar1, LVar2)
++        Call(N(DiagHeadPosition), ACTOR_BOSS, PRT_MAIN, LVar0, LVar1, LVar2)
++#else
+         Call(GetAnimatedPositionByTreeIndex, VINE_0, 10, LVar0, LVar1, LVar2)
+         Call(SetPartPos, ACTOR_BOSS, PRT_MAIN, LVar0, LVar1, LVar2)
++#endif
+         Call(GetAnimatedRotationByTreeIndex, VINE_0, 10, LVar0, LVar1, LVar2)
+         Call(SetPartRotation, ACTOR_BOSS, PRT_MAIN, LVar0, 0, LVar2)
+         Call(N(MarkVineInterpolationDirty))
+         // ---------------------------------------------------------------
+         // set position and orientation for VINE_0 bones
+         // VINE_0, bone 0
++#ifdef PM64_PORT
++        Call(N(DiagVineNode), VINE_0, 10, LVar0, LVar1, LVar2)
++#else
+         Call(GetAnimatedPositionByTreeIndex, VINE_0, 10, LVar0, LVar1, LVar2)
++#endif
+         Sub(LVar2, 2)
+         Call(N(SetVineBonePos), VINE_0, 0, LVar0, LVar1, LVar2)
+         Call(GetAnimatedRotationByTreeIndex, VINE_0, 10, LVar0, LVar1, LVar2)
 diff --git a/src/battle/btl_states_actions.c b/src/battle/btl_states_actions.c
 index 22cbf2bb6..fdb7a712c 100644
 --- a/src/battle/btl_states_actions.c
@@ -1334,6 +1430,32 @@ index 86a10c75e..fa701f85b 100644
          evt_set_variable(script, LVarF, (s32) effectRet);
      }
  
+diff --git a/src/evt/model_api.c b/src/evt/model_api.c
+index 6861b913a..48513b36c 100644
+--- a/src/evt/model_api.c
++++ b/src/evt/model_api.c
+@@ -334,6 +334,21 @@ API_CALLABLE(GetAnimatedPositionByTreeIndex) {
+     evt_set_variable(script, outX, x);
+     evt_set_variable(script, outY, y);
+     evt_set_variable(script, outZ, z);
++#ifdef PM64_PORT
++    {
++        extern unsigned boss_diag_selected(const void*, s32);
++        extern void boss_diag_node(const void*, s32, unsigned, const float*, const float*, const float*, const s32*);
++        unsigned kind = boss_diag_selected(script, script->id);
++        if (kind && listIndex == 0 && treeIndex == 10) {
++            Matrix4f matrix;
++            float input[3] = { node->pos.x, node->pos.y, node->pos.z };
++            float world[3] = { x, y, z };
++            s32 integer[3] = { (s32)x, (s32)y, (s32)z };
++            guMtxL2F(matrix, &model->mtx);
++            boss_diag_node(script, script->id, kind, input, &matrix[0][0], world, integer);
++        }
++    }
++#endif
+ 
+     return ApiStatus_DONE2;
+ }
 diff --git a/src/evt/npc_api.c b/src/evt/npc_api.c
 index ad4fc9a1b..4d42acffe 100644
 --- a/src/evt/npc_api.c

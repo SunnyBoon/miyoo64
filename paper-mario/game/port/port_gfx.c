@@ -17,6 +17,7 @@
 #include "gfx_rendering_api.h"
 #include "port.h"
 #include "savestate.h"
+#include "boss_diag.h"
 
 #define PANEL 240
 
@@ -377,13 +378,22 @@ int pm64_diag_stop_request(void) {
 int pm64_qtrace_request(void) { return pm64_diag_request(PM64_DIAG_RAW_COMPAT); }
 int pm64_qtrace_request_profile(unsigned profile) { (void) profile; return pm64_diag_request(PM64_DIAG_RENDER_FOCUS); }
 
+#ifdef PM64_BOSS_DIAG_M24
+#define DIAG_SESSION_PREFIX "m24a"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045BossDiagM24"
+#define DIAG_BUILD_NAME "PAL-0.4.5-BOSS-DIAG-M24"
+#else
+#define DIAG_SESSION_PREFIX "m221"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045DiagM221"
+#define DIAG_BUILD_NAME "PAL-0.4.5-DIAG-M221"
+#endif
 static void diag_write_metadata(uint32_t swap, const char *status, const char *reason, int screenshot) {
     char path[600];
     snprintf(path, sizeof path, "%s/metadata.json", sDiag.dir);
     FILE *m = fopen(path, "w");
     if (!m) return;
-    fprintf(m, "{\"diag_schema\":4,\"trace_id\":%u,\"diag_mode\":\"%s\",\"session_id\":\"m221-%08u\",\"comparison_group\":\"%s\",\"capture_role\":\"%s\",\"app\":\"PaperMarioPALAlpha045DiagM221\",\"build\":\"PAL-0.4.5-DIAG-M221\",\"build_stamp\":\"%08X\",\"swap_frame_start\":%u,\"swap_frame_end\":%u,\"game_frame_start\":%u,\"game_frame_end\":%u,\"reload_generation\":%u,\"reload_game_frame\":%u,\"cache_epoch\":%u,\"records\":%u,\"dropped_records\":%u,\"trace\":\"trace.log\",\"framebuffer\":%s,\"capture_status\":\"%s\",\"completion_reason\":\"%s\"}\n",
-            sDiag.seq, pm64_diag_mode_name(sDiag.mode), sDiag.seq, sDiag.group, sDiag.role,
+    fprintf(m, "{\"diag_schema\":4,\"trace_id\":%u,\"diag_mode\":\"%s\",\"session_id\":\"%s-%08u\",\"comparison_group\":\"%s\",\"capture_role\":\"%s\",\"app\":\"%s\",\"build\":\"%s\",\"build_stamp\":\"%08X\",\"swap_frame_start\":%u,\"swap_frame_end\":%u,\"game_frame_start\":%u,\"game_frame_end\":%u,\"reload_generation\":%u,\"reload_game_frame\":%u,\"cache_epoch\":%u,\"records\":%u,\"dropped_records\":%u,\"trace\":\"trace.log\",\"framebuffer\":%s,\"capture_status\":\"%s\",\"completion_reason\":\"%s\"}\n",
+            sDiag.seq, pm64_diag_mode_name(sDiag.mode), DIAG_SESSION_PREFIX, sDiag.seq, sDiag.group, sDiag.role, DIAG_APP_NAME, DIAG_BUILD_NAME,
             (unsigned)port_build_stamp, sDiag.swap_start, swap, sDiag.game_start, (unsigned)port_frame,
             sDiag.reload_generation, sDiag.reload_game, sDiag.cache_epoch, sDiag.records, sDiag.dropped_records,
             screenshot ? "\"frame.ppm\"" : "null", status, reason);
@@ -419,6 +429,7 @@ static int diag_begin(uint32_t swap) {
         }
     } else { sDiag.group[0] = 0; snprintf(sDiag.role, sizeof sDiag.role, "manual"); }
     if (sDiag.mode == PM64_DIAG_TIMELINE) {
+        boss_diag_arm();
         memset(&sProbe, 0, sizeof sProbe);
         memset(&sDiag.event_start, 0, sizeof sDiag.event_start);
         memset(&sDiag.event_end, 0, sizeof sDiag.event_end);
@@ -426,7 +437,7 @@ static int diag_begin(uint32_t swap) {
         pm64_diag_event_pending = 1;
     }
     diag_write_metadata(swap, "started", "armed_swap", 0);
-    port_log("M22 BEGIN session=m221-%08u mode=%s build_stamp=%08X swap=%u game=%u reload=%u epoch=%u\n", sDiag.seq,
+    port_log("M22 BEGIN session=%s-%08u mode=%s build_stamp=%08X swap=%u game=%u reload=%u epoch=%u\n", DIAG_SESSION_PREFIX, sDiag.seq,
              pm64_diag_mode_name(sDiag.mode), (unsigned)port_build_stamp, swap, (unsigned)port_frame, sDiag.reload_generation, sDiag.cache_epoch);
     if (sDiag.mode == PM64_DIAG_RENDER_FOCUS) {
         unsigned n = sDiag.history_count;
@@ -553,16 +564,41 @@ void pm64_diag_event_scheduler(void) {
     if (out->valid) pm64_event_collect_scripts(out);
     pm64_diag_event_pending = 0;
 }
+/* Write only on session completion, outside boss animation/position functions. */
+static void diag_boss_write(void) {
+    const struct BossCapture *c = boss_diag_result();
+    FILE *f = sDiag.log;
+    if (!f) { boss_diag_cancel(); return; }
+    const char *reason = boss_diag_reason();
+    fprintf(f, "M24A status=%s reason=%s capture=%u update=%u script_id=%d game_frame=%u reload=%u swap_start=%u build_stamp=%08X count=%u limit=%u\n",
+        strcmp(reason, "none") ? "incomplete" : "complete", reason, sDiag.seq, c->update_id,
+        c->script_id, c->game_frame, sDiag.reload_generation, sDiag.swap_start,
+        (unsigned)port_build_stamp, c->count, BOSS_EVENT_LIMIT);
+    for (unsigned i = 0; i < c->count; ++i) {
+        const struct BossEvent *e = &c->events[i];
+        fprintf(f, "M24A event=%u kind=%u world=%.9g,%.9g,%.9g", i + 1, e->kind,
+            (double)e->world[0], (double)e->world[1], (double)e->world[2]);
+        if (e->kind == BOSS_NODE_HEAD || e->kind == BOSS_NODE_VINE) {
+            fprintf(f, " input=%.9g,%.9g,%.9g integer=%d,%d,%d matrix=", (double)e->input[0],
+                (double)e->input[1], (double)e->input[2], e->integer[0], e->integer[1], e->integer[2]);
+            for (unsigned j = 0; j < 16; ++j) fprintf(f, "%s%.9g", j ? "," : "", (double)e->matrix[j]);
+        }
+        fputc('\n', f);
+    }
+    boss_diag_cancel();
+}
+
 static void diag_end_ex(uint32_t swap, const char *reason, int screenshot) {
     const int ok = screenshot ? diag_screenshot() : 0;
     if (sDiag.mode == PM64_DIAG_TIMELINE) {
+        diag_boss_write();
         pm64_probe_write();
         sDiag.event_start_pending = 0; /* no later scheduler: scripts stay unknown */
         sDiag.event_end_pending = 1;
         sDiag.event_end_wait = 1;
         pm64_diag_event_pending = 2;
     }
-    port_log("M22 END session=m221-%08u mode=%s records=%u dropped=%u swap=%u game=%u reason=%s ppm=%s\n", sDiag.seq,
+    port_log("M22 END session=%s-%08u mode=%s records=%u dropped=%u swap=%u game=%u reason=%s ppm=%s\n", DIAG_SESSION_PREFIX, sDiag.seq,
              pm64_diag_mode_name(sDiag.mode), sDiag.records, sDiag.dropped_records, swap, (unsigned)port_frame, reason, ok ? "ok" : "error");
     diag_write_metadata(swap, screenshot ? (ok ? "complete" : "error") : "partial", reason, ok);
     port_trace_file(NULL);
@@ -598,6 +634,7 @@ void pm64_diag_state_loaded(void) {
     /* Keep a tiny history across sessions: a following focus capture is linked
      * only to one observed load after one completed baseline, never guessed. */
     sDiag.reload_generation++; sDiag.reload_game = port_frame; sDiag.reload_swap = sDiag.swap_start;
+    if (sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE) boss_diag_fail();
     if (sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sDiag.records < PM64_DIAG_MAX_RECORDS) {
         sDiag.records++;
         port_log("M21 TIMELINE n=%u event=savestate_load generation=%u game=%u\n", sDiag.records, sDiag.reload_generation, (unsigned)port_frame);
