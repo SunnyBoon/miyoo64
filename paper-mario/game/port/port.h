@@ -86,6 +86,33 @@ void port_segment_loaded(int seg, uint32_t rom_start);
 /* The frame: the game's display lists go to the renderer (port_gfx.c). */
 void port_gfx_init(void);
 void port_gfx_task(void *gfx_list, int swap);
+/* M2.2 diagnostic sidecar. These functions only collect bounded observational
+ * records while a session is active; they never alter game or renderer state. */
+int pm64_diag_request(unsigned mode);
+const char *pm64_diag_mode_name(unsigned mode);
+const char *pm64_diag_state_name(void);
+int pm64_diag_stop_request(void);
+void pm64_diag_state_loaded(void);
+/* Values copied on the game thread, after a retrace, never from the renderer. */
+#include "../include/pm64_event_snapshot.h"
+void pm64_event_snapshot(struct PM64EventSnapshot *out);
+void pm64_diag_game_tick(void);
+void pm64_diag_merlee_phase(const char *phase, int a, int b, int c);
+int pm64_diag_render_focus_active(void);
+void pm64_diag_render_event(const char *kind, unsigned a, unsigned b, unsigned c, unsigned d);
+/* M2.2: bounded texture-import evidence.  These values are local diagnostic
+ * fingerprints, not source addresses or asset bytes. */
+struct PM64DiagTextureInfo {
+    uint32_t id, key, source_hash, import_wh, soft_wh, tile_params, result;
+};
+void pm64_diag_texture_event(const char *kind, const struct PM64DiagTextureInfo *info);
+void pm64_diag_texrect_event(uint32_t tile, int32_t ulx, int32_t uly, int32_t lrx, int32_t lry,
+                             int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy,
+                             const struct PM64DiagTextureInfo *unit0,
+                             const struct PM64DiagTextureInfo *unit1,
+                             uint32_t combine, uint32_t other_h, uint32_t other_l,
+                             uint32_t cms, uint32_t cmt);
+void pm64_diag_app_exit(void);
 void port_prev_frame_done(uint16_t *framebuffer); /* port_gfx.c: the effects' frame before */
 void *port_seg_to_ptr(uintptr_t addr);
 

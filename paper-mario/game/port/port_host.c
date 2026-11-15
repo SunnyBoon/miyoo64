@@ -179,6 +179,8 @@ const char *port_eboot_dir(void) {
 
 /* stderr and, on the device, console.log in the save dir (read it when the card comes back) */
 static FILE *sLogFile;
+static FILE *sTraceFile SAVESTATE_EXCLUDE;
+void port_trace_file(FILE *f) { sTraceFile = f; }
 #if defined(MIYOO)
 static int sLogDup; /* console.log is stderr (see vlog) */
 #endif
@@ -186,6 +188,7 @@ static volatile int sLogFd = -1; /* console.log's descriptor, for the crash line
 static void vlog(const char *fmt, va_list ap) {
     va_list ap2;
     va_copy(ap2, ap);
+    if (sTraceFile) { va_list at; va_copy(at, ap); vfprintf(sTraceFile, fmt, at); va_end(at); }
     vfprintf(stderr, fmt, ap);
 #ifdef PM64_SDL12
     if (!sLogFile && !sLogDup) {
@@ -423,6 +426,7 @@ int main(int argc, char **argv) {
         port_game_retrace();
         port_game_retrace();
         port_frame++;
+        pm64_diag_game_tick();
         port_debug_frame();
         port_loop_stage = PORT_STAGE_SAVE;
         port_flash_commit(); /* the game's save of this frame, whole, as one replace (port_rom.c) */
@@ -474,6 +478,7 @@ int main(int argc, char **argv) {
         }
     }
     port_log("port: %u game frames\n", port_frame);
+    pm64_diag_app_exit();
     savestate_shutdown();
 #ifdef PM64_SDL12
     /* the launcher after us gets the console back (port_sdl.c); the last line of console.log, as in every port */

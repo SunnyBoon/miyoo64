@@ -194,6 +194,9 @@ static void gfx_soft_upload_texture(const uint8_t *buf, int width, int height, u
         for (size_t i = 0; i < n; i++) d[i] = argb(buf[i*4+0], buf[i*4+1], buf[i*4+2], buf[i*4+3]);
     }
     sTex[id].px = dst; sTex[id].is16 = is16; sTex[id].w = width; sTex[id].h = height; sTex[id].valid = true;
+    { struct PM64DiagTextureInfo x = {0}; x.id = id; x.soft_wh = ((unsigned)width << 16) | (unsigned)height;
+      x.tile_params = ((unsigned)sTexUploadTile << 24) | (type & 0xffffu); x.result = 1;
+      pm64_diag_texture_event("soft_upload", &x); }
     { /* MK64_TEXDUMP=<dir>: every upload as RGB PPM + alpha PGM (debug). */
         static const char *sTd; static int sTdInit;
         if (!sTdInit) { sTdInit = 1; sTd = getenv("MK64_TEXDUMP"); }
@@ -524,6 +527,100 @@ static struct {
     int k1[4], k2[4], k3s[4]; /* fast paths: the second cycle's constants per channel, k3s = D << 8 */
     int shroud, sh[3]; /* the shroud (gfx_pc.c pm_shroud): 5-bit factor (0 = none) and its tint colour */
 } sGen SAVESTATE_EXCLUDE;
+/* The ItemEntity profile never changes a branch result.  It only counts the
+ * already chosen generic-combiner path while the one-shot trace is open. */
+static struct {
+    bool active;
+    bool st_chain_logged;
+    uint32_t states, tris;
+    uint64_t z_reject, alpha_reject, writes;
+    unsigned samples, alpha_samples;
+    uint8_t alpha_bins;
+    struct {
+        const uint8_t *src, *tlut;
+        uint32_t src_bytes, stride;
+        int w, h, ws, wt;
+        uint16_t tmem;
+        bool ci4_raw;
+    } ci4;
+} sItemTrace SAVESTATE_EXCLUDE;
+static inline int32_t gen_t1(int32_t x, int i);
+void gfx_itemtrace_begin(void) { memset(&sItemTrace, 0, sizeof(sItemTrace)); sItemTrace.active = true; }
+int gfx_itemtrace_active(void) { return sItemTrace.active; }
+static inline bool itemtrace_match(void) { return sItemTrace.active && sGen.on && sGen.w0 == 0xFFFFFFu && sGen.w1 == 0xFFFD7438u; }
+/* Logging gate for one fully emitted matching triangle.  It does not change
+ * the renderer's state, branches, sampler, or interpolation. */
+int gfx_itemtrace_claim_st_chain(void) {
+    if (!itemtrace_match() || sItemTrace.st_chain_logged) return 0;
+    sItemTrace.st_chain_logged = true;
+    return 1;
+}
+/* This records the already selected CI4 source for the active Item/TEXEL1 trace.
+ * It is metadata only: imports, sampler state, and the rasterizer remain unchanged. */
+void gfx_itemtrace_bind_ci4(const uint8_t *src, uint32_t src_bytes, uint32_t stride, const uint8_t *tlut,
+                            int w, int h, int ws, int wt, uint16_t tmem, bool ci4_raw) {
+    if (!sItemTrace.active) return;
+    sItemTrace.ci4.src = src; sItemTrace.ci4.src_bytes = src_bytes; sItemTrace.ci4.stride = stride;
+    sItemTrace.ci4.tlut = tlut; sItemTrace.ci4.w = w; sItemTrace.ci4.h = h;
+    sItemTrace.ci4.ws = ws; sItemTrace.ci4.wt = wt; sItemTrace.ci4.tmem = tmem;
+    sItemTrace.ci4.ci4_raw = ci4_raw;
+}
+static inline uint16_t itemtrace_be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
+static inline uint32_t itemtrace_rgba16(uint16_t c) {
+    const uint8_t r = (uint8_t)((c >> 11) & 31), g = (uint8_t)((c >> 6) & 31), b = (uint8_t)((c >> 1) & 31);
+    return argb((uint8_t)((r << 3) | (r >> 2)), (uint8_t)((g << 3) | (g >> 2)),
+                (uint8_t)((b << 3) | (b >> 2)), (c & 1) ? 255 : 0);
+}
+static void itemtrace_alpha_reject(int x, int y, int32_t uf, int32_t vf, int tw, int th, int ws, int wt,
+                                   int mu, int mv, uint32_t texel1, int fa, int amin, bool bilinear) {
+    if (!itemtrace_match()) return;
+    sItemTrace.alpha_reject++;
+    /* One deterministic 16x16 screen cell per quadrant avoids four adjacent edge samples. */
+    const unsigned bin = ((unsigned)x >> 4 & 1u) | (((unsigned)y >> 4 & 1u) << 1);
+    if (sItemTrace.alpha_samples >= 4 || (sItemTrace.alpha_bins & (1u << bin))) return;
+    sItemTrace.alpha_bins |= (uint8_t)(1u << bin);
+    sItemTrace.alpha_samples++;
+    const int32_t u1 = gen_t1(uf, 0), v1 = gen_t1(vf, 1);
+    const int32_t su = bilinear ? u1 - 0x8000 : u1, sv = bilinear ? v1 - 0x8000 : v1;
+    const int iu[4] = { wrapf(su >> 16, tw, ws, mu), wrapf((su >> 16) + (bilinear ? 1 : 0), tw, ws, mu),
+                        wrapf(su >> 16, tw, ws, mu), wrapf((su >> 16) + (bilinear ? 1 : 0), tw, ws, mu) };
+    const int iv[4] = { wrapf(sv >> 16, th, wt, mv), wrapf(sv >> 16, th, wt, mv),
+                        wrapf((sv >> 16) + (bilinear ? 1 : 0), th, wt, mv), wrapf((sv >> 16) + (bilinear ? 1 : 0), th, wt, mv) };
+    const int taps = bilinear ? 4 : 1;
+    port_log("ITEM_TEXEL1 ALPHA_REJECT_SAMPLE bin=%u x=%d y=%d uf=%d vf=%d t1f=%d,%d wrap=%d,%d tex=%dx%d wrap_mode=%d,%d tmem=%u filter=%s fa=%02X threshold=%02X texel1=%08X raw_ci4=%s\n",
+             bin, x, y, uf, vf, u1, v1, iu[0], iv[0], tw, th, ws, wt, (unsigned)sItemTrace.ci4.tmem,
+             bilinear ? "bilinear" : "nearest", fa, amin, texel1, sItemTrace.ci4.ci4_raw ? "available" : "unavailable");
+    for (int i = 0; i < taps; i++) {
+        const uint32_t at = (uint32_t)iv[i] * sItemTrace.ci4.stride + ((uint32_t)iu[i] >> 1);
+        if (!sItemTrace.ci4.ci4_raw || sItemTrace.ci4.src == NULL || sItemTrace.ci4.tlut == NULL || at >= sItemTrace.ci4.src_bytes) {
+            port_log("ITEM_TEXEL1 ALPHA_REJECT_TAP n=%d uv=%d,%d ci4=unavailable\n", i, iu[i], iv[i]);
+            continue;
+        }
+        const uint8_t ci4 = (sItemTrace.ci4.src[at] >> (4 - (iu[i] & 1) * 4)) & 15;
+        const uint16_t raw = itemtrace_be16(sItemTrace.ci4.tlut + ci4 * 2);
+        port_log("ITEM_TEXEL1 ALPHA_REJECT_TAP n=%d uv=%d,%d ci4=%u tlut16=%04X rgba=%08X\n",
+                 i, iu[i], iv[i], ci4, raw, itemtrace_rgba16(raw));
+    }
+}
+static inline void itemtrace_sample(int x, int y, int z, int fa, int fr, int fg, int fb) {
+    if (sItemTrace.samples++ < 4) port_log("ITEM_TEXEL1 PIXEL x=%d y=%d z=%d rgba=%02X%02X%02X%02X alpha_pass=1 z_pass=1 write=1\n", x, y, z, fr, fg, fb, fa);
+}
+void gfx_itemtrace_state(uint32_t omh, uint32_t oml, int edge, int ztest, int zupdate, int amin,
+                         const uint8_t *prim, const uint8_t *env) {
+    if (!itemtrace_match()) return;
+    sItemTrace.states++;
+    port_log("ITEM_TEXEL1 STATE combiner=FCFFFFFF FFFD7438 alpha_test=%d edge=%d threshold=%02X z_compare=%d z_update=%d om_h=%08X om_l=%08X prim=%02X%02X%02X%02X env=%02X%02X%02X%02X\n",
+             edge || amin > 0, edge, amin, ztest, zupdate, (unsigned)omh, (unsigned)oml,
+             prim[0],prim[1],prim[2],prim[3],env[0],env[1],env[2],env[3]);
+}
+void gfx_itemtrace_end(void) {
+    if (!sItemTrace.active) return;
+    port_log("ITEM_TEXEL1 SUMMARY states=%u tris=%u z_reject=%llu alpha_reject=%llu pixels_written=%llu samples=%u alpha_reject_samples=%u\n",
+             sItemTrace.states, sItemTrace.tris, (unsigned long long)sItemTrace.z_reject,
+             (unsigned long long)sItemTrace.alpha_reject, (unsigned long long)sItemTrace.writes, sItemTrace.samples > 4 ? 4 : sItemTrace.samples,
+             sItemTrace.alpha_samples);
+    sItemTrace.active = false;
+}
 /* PM64_CENSUS=1: pixels per generic combine, 3D and 2D, printed at exit (round 16: which combines get fast paths). */
 static int sGenCensus SAVESTATE_EXCLUDE = -1;
 static struct { uint32_t w0, w1; uint8_t two, fast; uint64_t px3, px2; uint32_t draws; } sGenCs[64] SAVESTATE_EXCLUDE;
@@ -617,7 +714,8 @@ void gfx_soft_pm_generic(bool on, uint32_t w0, uint32_t w1, bool two_cycle, cons
     gen_classify_fast();
 }
 /* Rect UVs were rebased in tile 0 space. Restore that offset only for TEXEL1,
- * before its relative shift; pm_gen_setup resets these fields for each draw. */
+ * before its relative shift; ds/dt also feed the TEXEL1-only and 2D fast paths.
+ * pm_gen_setup resets these fields for each draw. */
 void gfx_soft_pm_rect_rebase(int s, int t) {
     sGen.ds += s; sGen.dt += t;
     sGen.t1a[0] = (int32_t)((uint32_t)sGen.t1a[0] + (uint32_t)s * 65536u);
@@ -2009,15 +2107,18 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
                         if (g1px && gt0) t1 = bilerp(g1px, g1_16, g1w, g1h, g1ws, g1wt, gen_t1(uf, 0), gen_t1(vf, 1), g1mu, g1mv);
 #define GEN_COLOR_NEAREST                                                                              \
                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_NEAREST                                      \
+                        itemtrace_t1 = t1;                                                               \
                         const uint32_t c = pm_gen_eval(t0, t1, sr, sg, sb, sa);                         \
                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
 #define GEN_COLOR_BILINEAR                                                                             \
                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_BILINEAR                                     \
+                        itemtrace_t1 = t1;                                                               \
                         const uint32_t c = pm_gen_eval(t0, t1, sr, sg, sb, sa);                         \
                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
 /* The fast paths (gen_classify_fast), SMOOTH only: F is a constant in each span loop. */
 #define GEN_FAST(BILIN, F)                                                                             \
                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_##BILIN                                      \
+                        itemtrace_t1 = t1;                                                               \
                         const uint32_t c = pm_gen_fast(F, t0, t1, sr, sg, sb, sa);                      \
                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
 #else
@@ -2030,16 +2131,20 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
  * out. Both bit-exact (MK64 perf round 24, via ocarina-of-time d267ca3). */
 #define COLSTEP_0 , rq += rdq, gq += gdq, bq += bdq, aq += adq
 #define COLSTEP_1
+#define ITEMTRACE_FILTER_NEAREST 0
+#define ITEMTRACE_FILTER_BILINEAR 1
+#define ITEMTRACE_FILTER_(x) ITEMTRACE_FILTER_##x
+#define ITEMTRACE_FILTER(x) ITEMTRACE_FILTER_(x)
 #define SPAN_LOOP(TEX, ZTEST, ALPHA, BILIN) SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, 0, 0, 0)
 #define SPAN_LOOP_G(TEX, ZTEST, ALPHA, BILIN, GEN) SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, GEN, 0, 0)
 #define SPAN_LOOP_CM(TEX, ZTEST, ALPHA, BILIN, FLAT, CM) SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, 0, FLAT, CM)
 #define SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, GEN, FLAT, CM)                                           \
             for (int i = 0; i < span; i++, idx++, uf += duf, vf += dvf, zq += zdq COLSTEP_##FLAT) {     \
                 const int uz = clamp16_sh8(zq);                                                         \
-                if (ZTEST) { if (uz > zb[idx] + zbias) continue; }                                      \
+                if (ZTEST) { if (uz > zb[idx] + zbias) { if (itemtrace_match()) sItemTrace.z_reject++; continue; } } \
                 const int sr = FLAT ? fsr : clamp8_sh16(rq), sg = FLAT ? fsg : clamp8_sh16(gq);         \
                 const int sb = FLAT ? fsb : clamp8_sh16(bq), sa = FLAT ? fsa : clamp8_sh16(aq);         \
-                int fr, fg, fb, fa;                                                                     \
+                int fr, fg, fb, fa; uint32_t itemtrace_t1 = 0;                                         \
                 if (GEN == 1) { GEN_COLOR_##BILIN }                                                     \
                 else if (GEN > 10) { GEN_FAST(BILIN, GEN - 10) }                                        \
                 else if (TEX) {                                                                         \
@@ -2059,7 +2164,7 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
                     fa = !a_tex ? sa : (!a_in ? ta : div255(ta*sa));                                    \
                 } else { fr=sr; fg=sg; fb=sb; fa=sa; }                                                  \
                 if (ALPHA) {                                                                            \
-                    if (fa < amin) continue;                                                            \
+                    if (fa < amin) { itemtrace_alpha_reject(idx % sW, idx / sW, uf, vf, tw, th, ws, wt, tmask_u, tmask_v, itemtrace_t1, fa, amin, ITEMTRACE_FILTER(BILIN)); continue; } \
                     if (fa < 255 && ablend) {                                                           \
                         const uint32_t d = fbuf[idx];                                                   \
                         const int dr=(d>>16)&0xff, dg=(d>>8)&0xff, db=d&0xff;                           \
@@ -2068,6 +2173,7 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
                         fb = div255(fb*fa + db*(255-fa));                                               \
                     }                                                                                   \
                 }                                                                                       \
+                if (itemtrace_match()) { sItemTrace.writes++; itemtrace_sample(idx % sW, idx / sW, uz, fa, fr, fg, fb); } \
                 fbuf[idx] = argb((uint8_t)fr,(uint8_t)fg,(uint8_t)fb,255);                              \
                 if (ZTEST && dmask) zb[idx] = (uint16_t)uz;                                             \
             }
@@ -2276,6 +2382,7 @@ static void gfx_soft_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t 
     for (size_t i = 0; i < num_tris; i++) {
         const int ppon = sPpX != -1 && pp_on(); const uint32_t ppb = ppon ? sFB[sPpY * sW + sPpX] : 0;
         const int px = raster_tri(&v[i*3+0], &v[i*3+1], &v[i*3+2], true);
+        if (itemtrace_match()) sItemTrace.tris++;
         if (ppon) pp_log("tri", ppb);
 #ifdef PM64
         if (sGen.on && sGenCensus != 0 && px > 0) gen_census_add((uint64_t) px, true);
@@ -2412,7 +2519,7 @@ static void draw_2d_impl(float buf_vbo[], size_t buf_vbo_len, size_t num_sprites
         const int texunit = gen && !sGen.t0 ? 1 : 0;
         const int ws2 = tex ? soft_unit_wrap(texunit,tex,false) : 0, wt2 = tex ? soft_unit_wrap(texunit,tex,true) : 0;
 #else
-        const int ws2 = tex ? tex->wrap_s : 0, wt2 = tex ? tex->wrap_t : 0; /* pinned: the row[] stores are an aliasing barrier */
+        const int ws2 = tex ? tex->wrap_s : 0, wt2 = tex ? tex->wrap_t : 0;
 #endif
         const int32_t duf = tex ? to_fix16(dudx) : 0;
         for (int y = cy0; y < cy1; y++) {
@@ -2926,8 +3033,7 @@ void texman_clear(void) { sArenaUsed = 0; memset(sTex, 0, sizeof(sTex));
 #ifdef PM64
     memset(sUnitSampler, 0, sizeof(sUnitSampler));
 #endif
-    sNextTexId = 1;
-}
+    sNextTexId = 1; }
 
 /* Framebuffer readback (copy_framebuffer): the race-start wipe and the
  * stadium TV screens ask for small patches of the PREVIOUS frame at N64

@@ -98,6 +98,20 @@ void port_log(const char* fmt, ...);
 void port_log_always(const char* fmt, ...); /* PERF/STALL: ignores MK64_QUIET */
 #define PORT_LOG(...) port_log(__VA_ARGS__)
 
+/* M2.2 renderer-side diagnostic ABI.  The kit has its own historical
+ * port.h, so keep this small value type here rather than relying on the game
+ * port header selected later on the include path. */
+typedef struct PM64DiagTextureInfo {
+    u32 id, key, source_hash, import_wh, soft_wh, tile_params, result;
+} PM64DiagTextureInfo;
+void pm64_diag_render_event(const char* kind, unsigned a, unsigned b, unsigned c, unsigned d);
+void pm64_diag_texture_event(const char* kind, const PM64DiagTextureInfo* info);
+void pm64_diag_texrect_event(u32 tile, s32 ulx, s32 uly, s32 lrx, s32 lry,
+                             s16 uls, s16 ult, s16 dsdx, s16 dtdy,
+                             const PM64DiagTextureInfo* unit0, const PM64DiagTextureInfo* unit1,
+                             u32 combine, u32 other_h, u32 other_l, u32 cms, u32 cmt);
+void pm64_diag_state_loaded(void);
+
 /* Stadium TV screens (Luigi Raceway, Wario Stadium, the award ceremony): the
  * game copies a patch of the previous frame's framebuffer into RGBA16 course
  * textures.  The port has no CPU-readable framebuffer, so copy_framebuffer()

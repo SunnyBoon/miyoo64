@@ -1,0 +1,27 @@
+{
+  "id": "pm64palalpha045diagm222",
+  "identity": "PAL-0.4.5-DIAG-M222",
+  "title": "Paper Mario PAL Alpha 0.4.5 Diagnostic M2.2.2",
+  "folder": "PaperMarioPALAlpha045DiagM222",
+  "exe": "pm64",
+  "files": [
+    "pm64",
+    "recipes.bin"
+  ],
+  "icon": "icon.png",
+  "readme": "README-PAL-ALPHA-0.4.5-DIAG-M222.txt",
+  "env": "PM64",
+  "data": "data",
+  "trace_dir": "traces",
+  "empty_dirs": [
+    "data",
+    "traces"
+  ],
+  "rom": {
+    "name": "Paper Mario (Europe, PAL)",
+    "sha1": "2111d39265a317414d359e35a7d971c4dfa5f9e1",
+    "size": 67108864
+  },
+  "system": "PAPERMARIOPAL045DIAGM222",
+  "minui_tag": "PM64PAL045DIAGM222"
+}

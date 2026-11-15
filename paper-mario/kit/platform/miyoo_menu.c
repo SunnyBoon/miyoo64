@@ -42,12 +42,24 @@ extern void gfx_sdl12_set_res_dynamic(int on);
 extern void gfx_sdl12_set_res_pct(int pct);
 extern int gfx_soft_bilinear, gfx_soft_magbilin;
 extern void port_request_exit(void);
+#ifdef PM64
+extern int pm64_diag_request(unsigned mode);
+extern const char *pm64_diag_mode_name(unsigned mode);
+extern const char *pm64_diag_state_name(void);
+extern int pm64_diag_stop_request(void);
+#endif
 extern void port_audio_out_set_muted(int muted);
 extern uint32_t *gfx_soft_get_framebuffer(int *w, int *h);
 extern void controller_handheld_key(int sym, int down) __attribute__((weak));
 
+#ifdef PM64
+enum { I_RESUME, I_SAVE, I_LOAD, I_CONTROLS, I_DIAGNOSTIC, I_EXIT, I_COUNT };
+static const char *ITEM[I_COUNT] = { "RESUME", "SAVE STATE", "LOAD STATE", "CONTROLS", "DIAGNOSTIC", "EXIT GAME" };
+static unsigned sDiagMode SAVESTATE_EXCLUDE = 1; /* RENDER FOCUS */
+#else
 enum { I_RESUME, I_SAVE, I_LOAD, I_CONTROLS, I_EXIT, I_COUNT };
 static const char *ITEM[I_COUNT] = { "RESUME", "SAVE STATE", "LOAD STATE", "CONTROLS", "EXIT GAME" };
+#endif
 #define SLOT_MIN 1
 #define SLOT_MAX 9
 
@@ -171,9 +183,17 @@ static void compose_menu(int cur, int confirm) {
     text_centered(sDraw, py + 34, 3, HH_GAME_TITLE, C_TEXT);
     fill(sDraw, px + 30, py + 62, pw - 60, 2, C_EDGE);
     for (int i = 0; i < I_COUNT; i++) {
-        const int cy = py + 100 + i * 44;
+        const int cy = py + 92 + i * (I_COUNT >= 6 ? 35 : 44);
         if (i == cur) fill(sDraw, px + 20, cy - 18, pw - 40, 36, 0xFF283038u);
+        #ifdef PM64
+        if (i == I_DIAGNOSTIC) {
+            char diag[48];
+            snprintf(diag, sizeof diag, "DIAG %s: < %s >", pm64_diag_state_name(), pm64_diag_mode_name(sDiagMode));
+            text_centered(sDraw, cy, 2, diag, i == cur ? C_SEL : C_TEXT);
+        } else text_centered(sDraw, cy, 3, ITEM[i], i == cur ? C_SEL : C_TEXT);
+        #else
         text_centered(sDraw, cy, 3, ITEM[i], i == cur ? C_SEL : C_TEXT);
+        #endif
     }
     char buf[48];
     const int info_y = py + ph - 44;
@@ -291,6 +311,9 @@ void handheld_menu_run(struct SDL_Surface *screen_) {
                 cur = (cur + I_COUNT - 1) % I_COUNT; confirm = 0; dirty = 1;
                 break;
             case SDLK_LEFT:
+#ifdef PM64
+                if (cur == I_DIAGNOSTIC) { sDiagMode = sDiagMode == 1 ? 3 : sDiagMode - 1; confirm = 0; dirty = 1; break; }
+#endif
                 if (cur == I_SAVE || cur == I_LOAD) {
                     if (cur == I_LOAD && sAutoSel) { sAutoSel = 0; sSlot = SLOT_MAX; }
                     else if (cur == I_LOAD && sSlot == SLOT_MIN && AUTO_AVAILABLE()) sAutoSel = 1;
@@ -299,6 +322,9 @@ void handheld_menu_run(struct SDL_Surface *screen_) {
                 }
                 break;
             case SDLK_RIGHT:
+#ifdef PM64
+                if (cur == I_DIAGNOSTIC) { sDiagMode = sDiagMode == 3 ? 1 : sDiagMode + 1; confirm = 0; dirty = 1; break; }
+#endif
                 if (cur == I_SAVE || cur == I_LOAD) {
                     if (cur == I_LOAD && sAutoSel) { sAutoSel = 0; sSlot = SLOT_MIN; }
                     else if (cur == I_LOAD && sSlot == SLOT_MAX && AUTO_AVAILABLE()) sAutoSel = 1;
@@ -310,6 +336,19 @@ void handheld_menu_run(struct SDL_Surface *screen_) {
             case SDLK_RETURN: /* START */
                 if (cur == I_RESUME) running = 0;
                 else if (cur == I_CONTROLS) { sRemapScreen = screen; miyoo_remap_screen(sDraw, sBackup, remap_show, remap_key, remap_close); confirm = 0; dirty = 1; }
+#ifdef PM64
+                else if (cur == I_DIAGNOSTIC) {
+                    /* Keep the menu open when a session owns the recorder: M2 used
+                     * to close it after a rejected A press, making BUSY invisible. */
+                    if (pm64_diag_stop_request()) {
+                        handheld_menu_notify("DIAGNOSTIC STOP REQUESTED"); running = 0;
+                    } else if (pm64_diag_request(sDiagMode)) {
+                        handheld_menu_notify("DIAGNOSTIC ARMED"); running = 0;
+                    } else {
+                        handheld_menu_notify("DIAGNOSTIC BUSY"); dirty = 1;
+                    }
+                }
+#endif
                 else if (cur == I_SAVE) {
                     if (confirm || !savestate_slot_valid(sSlot)) { savestate_request_save(sSlot); running = 0; }
                     else { confirm = 1; dirty = 1; }

@@ -861,6 +861,103 @@ index 22cbf2bb6..fdb7a712c 100644
              general_heap_free(compressedAsset);
  
              ASSERT(size <= 0x8000);
+diff --git a/src/battle/player_events.c b/src/battle/player_events.c
+index 16b8a45b0..f5f7a4a9f 100644
+--- a/src/battle/player_events.c
++++ b/src/battle/player_events.c
+@@ -8,6 +8,9 @@
+ #include "battle/action_cmd/flee.h"
+ #include "battle/battle.h"
+ #include "sprite/player.h"
++/* Host-side M2 diagnostic hook. It is observational and deliberately keeps
++ * this decomp unit independent of the port-only include path. */
++extern void pm64_diag_merlee_phase(const char *phase, int a, int b, int c);
+ 
+ extern HudScript HES_Happy;
+ extern HudScript HES_HPDrain;
+@@ -377,6 +380,7 @@ API_CALLABLE(PlayBattleMerleeOrbFX) {
+ 
+ API_CALLABLE(BattleMerleeFadeStageToBlack) {
+     if (isInitialCall) {
++        pm64_diag_merlee_phase("FADE_TO_BLACK", 25, 0, 0);
+         mdl_set_all_tint_type(ENV_TINT_SHROUD);
+         *gBackgroundTintModePtr = ENV_TINT_SHROUD;
+         mdl_set_shroud_tint_params(0, 0, 0, 0);
+@@ -395,6 +399,7 @@ API_CALLABLE(BattleMerleeFadeStageToBlack) {
+ 
+ API_CALLABLE(BattleMerleeFadeStageFromBlack) {
+     if (isInitialCall) {
++        pm64_diag_merlee_phase("FADE_FROM_BLACK", 25, 0, 0);
+         script->functionTemp[0] = 25;
+     }
+ 
+@@ -413,6 +418,7 @@ API_CALLABLE(BattleFadeInMerlee) {
+     Npc* merlee = get_npc_unsafe(NPC_BTL_MERLEE);
+ 
+     if (isInitialCall) {
++        pm64_diag_merlee_phase("NPC_CREATED", 0, 0, 0);
+         sfx_play_sound(SOUND_MERLEE_APPEAR);
+         merlee->alpha = 0;
+     }
+@@ -443,6 +449,7 @@ API_CALLABLE(BattleMerleeUpdateFX) {
+     EnergyOrbWaveFXData* data;
+ 
+     if (isInitialCall) {
++        pm64_diag_merlee_phase("FX_HOLD", MERLEE_EFFECTS_HOLD, 12, 0);
+         script->functionTemp[1] = 0;
+         BattleMerleeBasePosY = merlee->pos.y;
+         BattleMerleeOrbEffect = fx_energy_orb_wave(0, merlee->pos.x, merlee->pos.y, merlee->pos.z, 0.4f, 0);
+@@ -496,6 +503,17 @@ API_CALLABLE(BattleMerleeUpdateFX) {
+ 
+ API_CALLABLE(BattleMerleeStopFX) {
+     BattleMerleeEffectsState = MERLEE_EFFECTS_RELEASE;
++    pm64_diag_merlee_phase("FX_RELEASE", MERLEE_EFFECTS_RELEASE, BattleMerleeEffectsTime, 0);
++    return ApiStatus_DONE2;
++}
++
++API_CALLABLE(BattleMerleeDiagMessage) {
++    pm64_diag_merlee_phase("MESSAGE", 0, 0, 0);
++    return ApiStatus_DONE2;
++}
++
++API_CALLABLE(BattleMerleeDiagDone) {
++    pm64_diag_merlee_phase("SCRIPT_DONE", 0, 0, 0);
+     return ApiStatus_DONE2;
+ }
+ 
+@@ -1703,8 +1721,10 @@ EvtScript EVS_MerleeAttackBonus = {
+     Wait(4)
+     Call(SetAnimation, ACTOR_SELF, 0, ANIM_Mario1_Idle)
+     Call(ShowMessageBox, BTL_MSG_MERLEE_ATK_UP, 60)
++    Call(BattleMerleeDiagMessage)
+     Call(WaitForMessageBoxDone)
+     ExecWait(EVS_MerleeRunOut)
++    Call(BattleMerleeDiagDone)
+     Return
+     End
+ };
+@@ -1757,8 +1777,10 @@ EvtScript EVS_MerleeDefenseBonus = {
+         Call(SetAnimation, ACTOR_SELF, 0, ANIM_Mario1_Idle)
+     EndIf
+     Call(ShowMessageBox, BTL_MSG_MERLEE_DEF_UP, 60)
++    Call(BattleMerleeDiagMessage)
+     Call(WaitForMessageBoxDone)
+     ExecWait(EVS_MerleeRunOut)
++    Call(BattleMerleeDiagDone)
+     Return
+     End
+ };
+@@ -1806,8 +1828,10 @@ EvtScript EVS_MerleeExpBonus = {
+     Wait(4)
+     Call(SetAnimation, ACTOR_SELF, 0, ANIM_Mario1_Idle)
+     Call(ShowMessageBox, BTL_MSG_MERLEE_EXP_UP, 60)
++    Call(BattleMerleeDiagMessage)
+     Call(WaitForMessageBoxDone)
+     ExecWait(EVS_MerleeRunOut)
++    Call(BattleMerleeDiagDone)
+     Return
+     End
+ };
 diff --git a/src/collision.c b/src/collision.c
 index 481d03230..07548ec83 100644
 --- a/src/collision.c
@@ -1237,6 +1334,173 @@ index 40bdb1ab5..b09142ec0 100644
              npc = (Npc*)npcID;
          } else {
              npc = get_npc_safe(npcID);
+diff --git a/src/evt/script_list.c b/src/evt/script_list.c
+index 8883e6c42..2bc536e81 100644
+--- a/src/evt/script_list.c
++++ b/src/evt/script_list.c
+@@ -1,5 +1,8 @@
+ #include "common.h"
+ #include "hud_element.h"
++#ifdef PM64_PORT
++#include "pm64_event_snapshot.h"
++#endif
+ 
+ s32 UniqueScriptCounter = 1;
+ s32 IsUpdatingScripts = false;
+@@ -574,10 +577,101 @@ Evt* restart_script(Evt* script) {
+     return script;
+ }
+ 
++#ifdef PM64_PORT
++/* Resolve relationships only by comparing with live scheduler-owned slots.
++ * Never dereference an event's parent, child, or bytecode pointers. */
++static int pm64_event_related_id(Evt* target, int* id) {
++    int i;
++    if (target == nullptr) return 0;
++    for (i = 0; i < MAX_SCRIPTS; i++) {
++        Evt* candidate = (*gCurrentScriptListPtr)[i];
++        if (candidate == target && candidate->stateFlags != 0) {
++            *id = candidate->id;
++            return 1;
++        }
++    }
++    return 0;
++}
++/* These are linker symbols for the three named kzn_17 script arrays. */
++extern EvtScript kzn_17_EVS_SetupSpinyTromp;
++extern EvtScript kzn_17_D_80240D10_C7EE90;
++extern EvtScript kzn_17_EVS_Kolorado_TrompImpact;
++static void pm64_event_copy_script(struct PM64EventScript* dst, Evt* script) {
++    Evt* parent;
++    dst->id = script->id;
++    dst->first_line = (__UINTPTR_TYPE__)script->ptrFirstLine;
++    dst->cur_line = (__UINTPTR_TYPE__)script->ptrCurLine;
++    dst->state_flags = script->stateFlags;
++    dst->opcode_known = script->curOpcode != EVT_OP_INTERNAL_FETCH;
++    dst->opcode = dst->opcode_known ? script->curOpcode : 0;
++    dst->blocked_known = dst->opcode_known;
++    dst->blocked = dst->blocked_known ? !!script->blocked : 0;
++    parent = script->blockingParent != nullptr ? script->blockingParent : script->parentScript;
++    dst->parent_known = pm64_event_related_id(parent, &dst->parent_id);
++    dst->child_known = pm64_event_related_id(script->childScript, &dst->child_id);
++}
++void pm64_event_collect_scripts(struct PM64EventSnapshot* out) {
++    int i, k;
++    Bytecode* targets[PM64_KZN_SCRIPT_COUNT] = {
++        kzn_17_EVS_SetupSpinyTromp, kzn_17_D_80240D10_C7EE90, kzn_17_EVS_Kolorado_TrompImpact
++    };
++    out->scripts_valid = 0;
++    out->script_count = out->script_captured = 0;
++    out->vulkan_scripts_valid = 0;
++    for (k = 0; k < PM64_KZN_SCRIPT_COUNT; k++) out->vulkan_matches[k] = 0;
++    if (gCurrentScriptListPtr != &gWorldScriptList &&
++        gCurrentScriptListPtr != &gBattleScriptList) return;
++    out->scripts_valid = 1;
++    out->vulkan_scripts_valid = gCurrentScriptListPtr == &gWorldScriptList && pm64_event_kzn17_ready(out);
++    for (i = 0; i < MAX_SCRIPTS; i++) {
++        Evt* script = (*gCurrentScriptListPtr)[i];
++        if (script == nullptr || script->stateFlags == 0) continue;
++        out->script_count++;
++        if (out->vulkan_scripts_valid) {
++            for (k = 0; k < PM64_KZN_SCRIPT_COUNT; k++) {
++                if (script->ptrFirstLine == targets[k]) {
++                    if (out->vulkan_matches[k] == 0)
++                        pm64_event_copy_script(&out->vulkan_scripts[k], script);
++                    out->vulkan_matches[k]++;
++                }
++            }
++        }
++        if (out->script_captured < PM64_EVENT_SCRIPT_LIMIT)
++            pm64_event_copy_script(&out->scripts[out->script_captured++], script);
++    }
++}
++#endif
++
++#ifdef PM64_PORT
++/* One read-only sample at scheduler boundaries; no bytecode dereferences. */
++static void pm64_probe_values(struct PM64ProbeValues* v, Evt* e) {
++    v->valid = 1; v->id = e->id; v->cur = (__UINTPTR_TYPE__)e->ptrCurLine;
++    v->next = (__UINTPTR_TYPE__)e->ptrNextLine; v->opcode = e->curOpcode;
++    v->flags = e->stateFlags; v->counter = e->frameCounter; v->scale = e->timeScale;
++    v->lvar1 = e->varTable[1]; v->lvare = e->varTable[14]; v->lvarf = e->varTable[15];
++}
++#endif
++
+ void update_scripts(void) {
+     s32 i;
+-
++#ifdef PM64_PORT
++    struct PM64ProbeRow probe = {0}; Evt* target = nullptr; s32 targetID = 0;
++    int probing = pm64_probe_active() && pm64_probe_map();
++    if (probing && (gCurrentScriptListPtr == &gWorldScriptList)) {
++        for (i = 0; i < MAX_SCRIPTS; i++) {
++            Evt* e = (*gCurrentScriptListPtr)[i];
++            if (e != nullptr && e->stateFlags != 0 && e->ptrFirstLine == kzn_17_EVS_SetupSpinyTromp) {
++                if (target != nullptr) { target = nullptr; probe.reason = 5; break; }
++                target = e; targetID = e->id;
++            }
++        }
++        if (target != nullptr) { probe.present = 1; pm64_probe_values(&probe.before, target); }
++    }
++#endif
+     if (gGameStatusPtr->debugScripts == DEBUG_SCRIPTS_NO_UPDATE) {
++#ifdef PM64_PORT
++        if (probing) { probe.reason = 1; pm64_probe_store(&probe); }
++#endif
+         return;
+     }
+ 
+@@ -587,6 +681,13 @@ void update_scripts(void) {
+     for (i = 0; i < gScriptListCount; i++) {
+         Evt* script = (*gCurrentScriptListPtr)[gScriptIndexList[i]];
+ 
++#ifdef PM64_PORT
++        if (probing && script == target && script != nullptr && script->id == targetID) {
++            probe.reached = 1;
++            if (script->id != gScriptIdList[i]) probe.reason = 2;
++            else if (!script->stateFlags || (script->stateFlags & (EVT_FLAG_SUSPENDED | EVT_FLAG_BLOCKED_BY_CHILD | EVT_FLAG_PAUSED))) probe.reason = 3;
++        }
++#endif
+         if (script != nullptr &&
+             script->id == gScriptIdList[i] &&
+             script->stateFlags != 0 &&
+@@ -605,6 +706,9 @@ void update_scripts(void) {
+                 };
+ 
+                 script->frameCounter -= 1.0;
++#ifdef PM64_PORT
++                if (probing && script == target && script->id == targetID) probe.invoked = 1;
++#endif
+                 status = evt_execute_next_command(script);
+                 if (status == EVT_CMD_RESULT_ERROR) {
+                     stop = true;
+@@ -613,11 +717,26 @@ void update_scripts(void) {
+             } while (status != EVT_CMD_RESULT_YIELD);
+ 
+             if (stop) {
++#ifdef PM64_PORT
++                if (probing && !probe.reached) probe.error_before = 1;
++#endif
+                 break;
+             }
+         }
+     }
+     IsUpdatingScripts = false;
++#ifdef PM64_PORT
++    if (probing) {
++        if (probe.reached && !probe.invoked && !probe.reason) probe.reason = 4;
++        if (probe.present) for (i = 0; i < MAX_SCRIPTS; i++) {
++            Evt* e = (*gCurrentScriptListPtr)[i];
++            if (e == target && e->id == targetID) { pm64_probe_values(&probe.after, e); break; }
++        }
++        pm64_probe_store(&probe);
++    }
++
++    if (pm64_diag_event_pending) pm64_diag_event_scheduler();
++#endif
+ }
+ 
+ // Does nothing, is cursed
 diff --git a/src/filemenu/filemenu_common.c b/src/filemenu/filemenu_common.c
 index 4b8b88b7b..a37e38a2b 100644
 --- a/src/filemenu/filemenu_common.c

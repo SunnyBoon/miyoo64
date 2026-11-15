@@ -160,6 +160,9 @@ struct TextureHashmapNode {
     /* The import extent is part of the converted texture identity.  The same
      * source can be addressed through tiles with different effective bounds. */
     uint16_t import_width, import_height;
+    /* Observational only; not part of the functional cache identity. */
+    uint32_t diag_key, diag_import_wh;
+    uint8_t diag_result;
     bool linear_filter;
     uint8_t mirror; // texels imported doubled with the mirrored copy: bit 0 along S, bit 1 along T
 } __attribute__((packed, aligned(4)));
@@ -222,6 +225,13 @@ static struct RSP {
     struct VertexColor loaded_vertices_2D[4];
     struct LoadedVertex loaded_vertices[MAX_VERTICES];
 } rsp  __attribute__((aligned(16)));
+
+/* Observational sidecar: the actual source and scaled S/T survive until the
+ * same LoadedVertex participates in the single ItemEntity trace triangle. */
+static struct {
+    int16_t raw_s, raw_t;
+    int16_t scaled_s, scaled_t;
+} gfx_itemtrace_st[MAX_VERTICES];
 
 #ifdef PM64
 #define GFX_LT_SLOTS 8 /* texture loads, by TMEM address (gfx_lt_find) */
@@ -1033,6 +1043,9 @@ static void gfx_texture_cache_reset(bool midframe) {
     }
     texman_clear();
     gfx_cache_epoch++;
+    pm64_diag_render_event("cache_reset", gfx_cache_epoch, midframe, gfx_texture_cache.pool_pos, gfx_midframe_resets);
+    { struct PM64DiagTextureInfo x = {0}; x.result = gfx_cache_epoch; x.tile_params = midframe ? 1u : 0u;
+      pm64_diag_texture_event("cache_reset", &x); }
     if (gfx_epochfix_on()) {
         rendering_state.textures[0] = rendering_state.textures[1] = NULL;
         rdp.textures_changed[0] = rdp.textures_changed[1] = true;
@@ -1461,6 +1474,7 @@ static inline uint32_t pm_sampler_tile_axis(int tile, bool t, bool baked) {
  * Complete pending triangles before changing the state used by their rasterizer. */
 static void pm_set_sampler(int tile, bool linear, uint32_t cms, uint32_t cmt) {
     static struct { uint32_t s,t; bool valid; } last[2];
+    /* Software filtering is draw state, not this legacy sampler argument. */
     if (!last[tile].valid || last[tile].s != cms || last[tile].t != cmt)
         gfx_flush();
     last[tile].s = cms; last[tile].t = cmt; last[tile].valid = true;
@@ -1497,6 +1511,19 @@ static int gfx_sampler_tile(int tile, const struct TextureHashmapNode *hit) {
         gfx_sampler_clobbers++;
     return gfx_samplerfix ? tile : 0;
 }
+static uint32_t gfx_diag_cache_key(const uint8_t *addr, uint32_t fmt, uint32_t siz, uint8_t mirror) {
+    uintptr_t v = (uintptr_t)addr;
+    uint32_t x = (uint32_t)(v >> 4) ^ (uint32_t)(v >> 29) ^ (fmt << 24) ^ (siz << 16) ^ mirror;
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; return x ^ (x >> 16);
+}
+static void gfx_diag_cache_event(const char *kind, const struct TextureHashmapNode *node, int tile) {
+    struct PM64DiagTextureInfo x = {0};
+    x.id = node->texture_id; x.key = node->diag_key; x.source_hash = node->content_hash;
+    x.import_wh = node->diag_import_wh;
+    x.tile_params = (node->fmt & 0xffu) | ((uint32_t)node->siz << 8) | ((uint32_t)node->mirror << 16) | ((uint32_t)(tile & 0xff) << 24);
+    x.result = node->diag_result;
+    pm64_diag_texture_event(kind, &x);
+}
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz, uint8_t mirror, uint32_t width, uint32_t height) {
     size_t hash = (uintptr_t)orig_addr;
     uint32_t content_hash = gfx_texture_content_hash(tile, fmt, siz);
@@ -1515,6 +1542,7 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
                 gfx_rapi->set_sampler_parameters(gfx_sampler_tile(tile, *node), (*node)->linear_filter, (*node)->cms, (*node)->cmt);
 #endif
                 (*node)->last_used_frame = gfx_frame_counter;
+                (*node)->diag_result = 1;
                 *n = *node;
                 return true;
             }
@@ -1532,6 +1560,10 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     if (stale != NULL) {
         if (gfx_debug_frame) port_log("  reimport tex %u addr %p fmt %u siz %u hash %08X->%08X\n", stale->texture_id, orig_addr, fmt, siz, stale->content_hash, content_hash);
         stale->content_hash = content_hash;
+        stale->diag_key = gfx_diag_cache_key(orig_addr, fmt, siz, mirror);
+        stale->diag_import_wh = (width << 16) | (height & 0xffffu);
+        stale->diag_result = 3;
+        gfx_diag_cache_event("cache_reimport", stale, tile);
         stale->import_width = width;
         stale->import_height = height;
         stale->last_used_frame = gfx_frame_counter;
@@ -1573,6 +1605,10 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     (*node)->siz = siz;
     (*node)->mirror = mirror;
     (*node)->content_hash = content_hash;
+    (*node)->diag_key = gfx_diag_cache_key(orig_addr, fmt, siz, mirror);
+    (*node)->diag_import_wh = (width << 16) | (height & 0xffffu);
+    (*node)->diag_result = 2;
+    gfx_diag_cache_event("cache_new", *node, tile);
     (*node)->import_width = width;
     (*node)->import_height = height;
     (*node)->last_used_frame = gfx_frame_counter;
@@ -2209,6 +2245,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
 
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
+        const short itemtrace_scaled_s = U, itemtrace_scaled_t = V;
         
         if (rsp.geometry_mode & G_LIGHTING) {
             if (rsp.lights_changed) {
@@ -2296,6 +2333,10 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         
         d->u = U;
         d->v = V;
+        gfx_itemtrace_st[dest_index].raw_s = v->tc[0];
+        gfx_itemtrace_st[dest_index].raw_t = v->tc[1];
+        gfx_itemtrace_st[dest_index].scaled_s = itemtrace_scaled_s;
+        gfx_itemtrace_st[dest_index].scaled_t = itemtrace_scaled_t;
         
         // Trivial-reject flags -- only meaningful for a PERSPECTIVE projection.
         // An orthographic draw (screen-space skybox / HUD) has w==1 and
@@ -2714,6 +2755,38 @@ static int pm_genshade_on(void) {
 /* The generic draw's TEXEL1 follows TEXEL0's S/T: (s + a) * 2^k + c (gen_t1). pm_gen_setup notes k and whether
  * both texels are read, for the per-triangle UV drop (gfx_emit_triangle, pm_uv_step). */
 static int pm_t1_k[2], pm_t1_linked;
+extern void gfx_itemtrace_state(uint32_t omh, uint32_t oml, int edge, int ztest, int zupdate, int amin,
+                                const uint8_t *prim, const uint8_t *env);
+extern int gfx_itemtrace_active(void);
+extern int gfx_itemtrace_claim_st_chain(void);
+extern void gfx_itemtrace_bind_ci4(const uint8_t *src, uint32_t src_bytes, uint32_t stride, const uint8_t *tlut,
+                                   int w, int h, int ws, int wt, uint16_t tmem, bool ci4_raw);
+/* Capture the exact CI4 source descriptor already selected for TEXEL1.  The
+ * temporary descriptor is restored before returning; this is trace metadata,
+ * not a texture import or a rendering-state change. */
+static void pm_itemtrace_bind_t1(int t1i) {
+    __typeof__(rdp.texture_tile) saved = rdp.texture_tile;
+    const int saved_wide = pm_wide_tile;
+    rdp.texture_tile.fmt = pm_tiles[t1i].fmt; rdp.texture_tile.siz = pm_tiles[t1i].siz;
+    rdp.texture_tile.cms_raw = pm_tiles[t1i].cms; rdp.texture_tile.cmt_raw = pm_tiles[t1i].cmt;
+    rdp.texture_tile.masks = pm_tiles[t1i].masks; rdp.texture_tile.maskt = pm_tiles[t1i].maskt;
+    rdp.texture_tile.palette = pm_tiles[t1i].palette; rdp.texture_tile.line_size_bytes = pm_tiles[t1i].line * 8;
+    rdp.texture_tile.uls = pm_tiles[t1i].uls; rdp.texture_tile.ult = pm_tiles[t1i].ult;
+    rdp.texture_tile.lrs = pm_tiles[t1i].lrs; rdp.texture_tile.lrt = pm_tiles[t1i].lrt;
+    rdp.texture_tile.tmem = pm_tiles[t1i].tmem;
+    pm_render_tile_cm();
+    uint32_t width, height, src_bytes, stride;
+    gfx_tile_size(1, &width, &height);
+    const uint8_t *src = pm_tile_src(1, &src_bytes, &stride, NULL);
+    const uint8_t *tlut = pm_tlut[pm_tiles[t1i].palette & 15];
+    const uint8_t mirror = gfx_mirror_flags(width, height);
+    gfx_itemtrace_bind_ci4(src, src_bytes, stride, tlut, (int)width, (int)height,
+                           (int)pm_sampler_tile_axis(1, false, mirror & 1),
+                           (int)pm_sampler_tile_axis(1, true, mirror & 2), pm_tiles[t1i].tmem,
+                           mirror == 0 && !pm_wide_tile && pm_tiles[t1i].fmt == G_IM_FMT_CI && pm_tiles[t1i].siz == G_IM_SIZ_4b);
+    rdp.texture_tile = saved;
+    pm_wide_tile = saved_wide;
+}
 static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
     pm_t1_linked = t0 && t1;
     pm_t1_k[0] = pm_t1_k[1] = 0;
@@ -2728,10 +2801,11 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
             rdp.textures_changed[i] = false;
         }
         if (rendering_state.textures[i] != NULL) {
+            const int ti = i == 0 ? pm_prim_tile : (pm_prim_tile + 1) & 7;
             gfx_rapi->select_texture(i, rendering_state.textures[i]->texture_id);
             const uint8_t baked = rendering_state.textures[i]->mirror;
             pm_set_sampler(i, false, pm_sampler_tile_axis(i, false, baked & 1),
-                                     pm_sampler_tile_axis(i, true, baked & 2));
+                                             pm_sampler_tile_axis(i, true, baked & 2));
         }
     }
     gfx_tex_stress_hold = 0;
@@ -2743,6 +2817,8 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
     const uint8_t prim[4] = { rdp.prim_color.r, rdp.prim_color.g, rdp.prim_color.b, rdp.prim_color.a };
     const uint8_t env[4] = { rdp.env_color.r, rdp.env_color.g, rdp.env_color.b, rdp.env_color.a };
     gfx_flush();
+    if (gfx_itemtrace_active() && rdp.pm_cc_w0 == 0xFFFFFFu && rdp.pm_cc_w1 == 0xFFFD7438u)
+        pm_itemtrace_bind_t1(t1i);
     /* TEXEL1 from TEXEL0's S/T (gen_t1 in gfx_soft.c; round 16, R29): tile 1's own shift and corner, the corners
      * with their quarter texels. PM64_T1SCALE=0: tile 0's scale and round 15's whole-texel offset. */
     int32_t t1map[6] = { ds * 65536, 0, 0, dt * 65536, 0, 0 };
@@ -2758,6 +2834,19 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
     gfx_soft_pm_shroud(pm_shroud(), rdp.blend_color.r, rdp.blend_color.g, rdp.blend_color.b);
     { extern bool gfx_soft_1cyc_t1; gfx_soft_1cyc_t1 = pm_1cyc_t1_on(); }
     gfx_soft_pm_generic(true, rdp.pm_cc_w0, rdp.pm_cc_w1, two_cycle, prim, env, rdp.pm_prim_lod, ds, dt, t1map);
+    if (gfx_itemtrace_active() && rdp.pm_cc_w0 == 0xFFFFFFu && rdp.pm_cc_w1 == 0xFFFD7438u) {
+        const int t0i = pm_prim_tile;
+        const uint8_t *pal = pm_tlut[pm_tiles[t1i].siz == G_IM_SIZ_4b ? pm_tiles[t1i].palette & 15 : 0];
+        port_log("ITEM_TEXEL1 BIND tile0=%d fmt=%u siz=%u tmem=%u line=%u tile1=%d fmt=%u siz=%u tmem=%u line=%u palette_bank=%u tlut=%s shifts=%u,%u t1map=%d,%d,%d,%d,%d,%d\n",
+                 t0i,pm_tiles[t0i].fmt,pm_tiles[t0i].siz,pm_tiles[t0i].tmem,pm_tiles[t0i].line*8,
+                 t1i,pm_tiles[t1i].fmt,pm_tiles[t1i].siz,pm_tiles[t1i].tmem,pm_tiles[t1i].line*8,
+                 pm_tiles[t1i].palette & 15,pal ? "loaded" : "missing",pm_tiles[t1i].shifts,pm_tiles[t1i].shiftt,
+                 (int)t1map[0],(int)t1map[1],t1map[2],(int)t1map[3],(int)t1map[4],t1map[5]);
+        if (pal) port_log("ITEM_TEXEL1 TLUT16 raw=%02X%02X %02X%02X %02X%02X %02X%02X\n", pal[0],pal[1],pal[2],pal[3],pal[4],pal[5],pal[6],pal[7]);
+        gfx_itemtrace_state(rdp.other_mode_h, rdp.other_mode_l, (rdp.other_mode_l & CVG_X_ALPHA) != 0,
+                            (rdp.other_mode_l & Z_CMP) != 0, (rdp.other_mode_l & Z_UPD) != 0,
+                            (rdp.other_mode_l & CVG_X_ALPHA) ? 0x55 : 8, prim, env);
+    }
     if (t1 && pm_tileshift_on() && !pm_t1scale_on() && (pm_tiles[t1i].shifts != pm_tiles[pm_prim_tile].shifts || pm_tiles[t1i].shiftt != pm_tiles[pm_prim_tile].shiftt)) {
         static uint32_t sSeen[8][2]; static int sLogged; /* the generic path samples TEXEL1 at tile 0's scale: */
         int i = 0;                                          /* say once per combine where a draw would want more */
@@ -2963,17 +3052,19 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
                 const uint32_t cms = rdp.texture_tile.cms, cmt = rdp.texture_tile.cmt;
 #endif
 #ifdef PM64
+                /* Another unit may share this cache node, so the node's last
+                 * modes alone do not describe this unit's current state. */
                 pm_set_sampler(i, linear_filter, cms, cmt);
                 rendering_state.textures[i]->linear_filter = linear_filter;
                 rendering_state.textures[i]->cms = cms;
                 rendering_state.textures[i]->cmt = cmt;
 #else
                 if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
-                gfx_flush();
-                gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
-                rendering_state.textures[i]->linear_filter = linear_filter;
-                rendering_state.textures[i]->cms = cms;
-                rendering_state.textures[i]->cmt = cmt;
+                    gfx_flush();
+                    gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
+                    rendering_state.textures[i]->linear_filter = linear_filter;
+                    rendering_state.textures[i]->cms = cms;
+                    rendering_state.textures[i]->cmt = cmt;
                 }
 #endif
             }
@@ -3015,10 +3106,13 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
         tex_width = (float) tw;
         tex_height = (float) th;
 #ifdef PM64
-        /* Generic TEXEL1-only combines emit UVs for the SoftTex currently
-         * bound at unit 1.  The rasterizer multiplies by that texture's
-         * uploaded extent, so use the same extent here.  With no valid unit-1
-         * binding, retain the established tile-0 frame. */
+        /* The generic TEXEL1-only path sends these UVs to the SoftTex bound at
+         * unit 1.  Use its actual uploaded extent: the rasterizer reconstructs
+         * uf/vf by multiplying the normalised UVs by that same extent.  Keep
+         * tile 0's origin and shift below; gen_t1() performs tile 1's relative
+         * corner and shift transform after interpolation.  A missing or invalid
+         * binding reports 0x0, in which case retain the established tile-0
+         * normalisation rather than introduce a zero-sized coordinate frame. */
         if (pmg && !pmt0 && pmt1 && rendering_state.textures[1] != NULL) {
             int bound_w, bound_h;
             gfx_soft_tex_size(1, &bound_w, &bound_h);
@@ -3218,7 +3312,6 @@ static inline void gfx_emit_vertex(const struct LoadedVertex *cv, uint32_t cc_id
  * planes hundreds of times across single polygons). */
 #define GFX_MAX_UV_REPEATS 16.0f
 #ifdef PM64
-extern void gfx_soft_tex_size(int tile, int *w, int *h);
 static int pm_uvrebase_on(void) { static int s = -1; if (s < 0) { const char *e = getenv("PM64_UVREBASE"); s = !(e && e[0] == '0'); } return s; }
 static int pm_uvdrop_on(void) { static int s = -1; if (s < 0) { const char *e = getenv("PM64_UVDROP"); s = !(e && e[0] == '0'); } return s; }
 /* The drop for one axis in steps of base (1, or 2 for a doubled mirror) and of the smallest power of two L with
@@ -3276,10 +3369,10 @@ static void gfx_emit_triangle(const struct LoadedVertex *a, const struct LoadedV
     gfx_emit_vertex(a, cc_id, lod);
     gfx_emit_vertex(b, cc_id, lod);
     gfx_emit_vertex(c, cc_id, lod);
+    psp_fast_t *const first = &buf_vbo[buf_num_vert - 3];
     if (tri_state.use_texture) {
 #ifndef PORT_NO_UVDROP
         // Drop the whole texture repeats shared by the three vertices (periodic under REPEAT).
-        psp_fast_t *first = &buf_vbo[buf_num_vert - 3];
         float minu = first[0].u, minv = first[0].v;
         int i;
         for (i = 1; i < 3; i++) {
@@ -3314,6 +3407,38 @@ static void gfx_emit_triangle(const struct LoadedVertex *a, const struct LoadedV
         }
 #endif
     }
+#ifdef PM64
+    /* Emit one record after any UV-repeat drop, i.e. from the exact SoftVtx
+     * values handed to the perspective rasterizer.  A clipped/interpolated
+     * source vertex is marked rather than reconstructed. */
+    if (gfx_itemtrace_active() && gfx_itemtrace_claim_st_chain()) {
+        const struct LoadedVertex *src[3] = { a, b, c };
+        const int t0 = pm_prim_tile, t1 = (pm_prim_tile + 1) & 7;
+        port_log("ITEM_TEXEL1_ST_CHAIN TRI tile0=%d fmt=%u siz=%u tmem=%u line=%u uls=%u ult=%u lrs=%u lrt=%u shift=%u,%u tile1=%d fmt=%u siz=%u tmem=%u line=%u uls=%u ult=%u lrs=%u lrt=%u shift=%u,%u scale_u16=%u,%u\n",
+                 t0, pm_tiles[t0].fmt, pm_tiles[t0].siz, pm_tiles[t0].tmem, pm_tiles[t0].line * 8,
+                 pm_tiles[t0].uls, pm_tiles[t0].ult, pm_tiles[t0].lrs, pm_tiles[t0].lrt, pm_tiles[t0].shifts, pm_tiles[t0].shiftt,
+                 t1, pm_tiles[t1].fmt, pm_tiles[t1].siz, pm_tiles[t1].tmem, pm_tiles[t1].line * 8,
+                 pm_tiles[t1].uls, pm_tiles[t1].ult, pm_tiles[t1].lrs, pm_tiles[t1].lrt, pm_tiles[t1].shifts, pm_tiles[t1].shiftt,
+                 rsp.texture_scaling_factor.s, rsp.texture_scaling_factor.t);
+        for (int i = 0; i < 3; i++) {
+            const uintptr_t p = (uintptr_t)src[i], lo = (uintptr_t)&rsp.loaded_vertices[0];
+            const size_t span = sizeof(rsp.loaded_vertices);
+            const bool loaded = p >= lo && p - lo < span && (p - lo) % sizeof(rsp.loaded_vertices[0]) == 0;
+            const size_t vi = loaded ? (size_t)((p - lo) / sizeof(rsp.loaded_vertices[0])) : 0;
+            const float uw = first[i].u * first[i].invw, vw = first[i].v * first[i].invw;
+            if (loaded) {
+                port_log("ITEM_TEXEL1_ST_CHAIN VERTEX n=%d raw_st_s10.5=%d,%d scaled_st_s10.5=%d,%d cv_st_s10.5=%d,%d clip_w=%.9g invw=%.9g emitted_uv_norm=%.9g,%.9g raster_uv_norm=%.9g,%.9g raster_uw_vw=%.9g,%.9g\n",
+                         i, gfx_itemtrace_st[vi].raw_s, gfx_itemtrace_st[vi].raw_t,
+                         gfx_itemtrace_st[vi].scaled_s, gfx_itemtrace_st[vi].scaled_t,
+                         (int)src[i]->u, (int)src[i]->v, src[i]->_w, first[i].invw,
+                         first[i].u, first[i].v, first[i].u, first[i].v, uw, vw);
+            } else {
+                port_log("ITEM_TEXEL1_ST_CHAIN VERTEX n=%d source=interpolated clip_w=%.9g invw=%.9g emitted_uv_norm=%.9g,%.9g raster_uv_norm=%.9g,%.9g raster_uw_vw=%.9g,%.9g\n",
+                         i, src[i]->_w, first[i].invw, first[i].u, first[i].v, first[i].u, first[i].v, uw, vw);
+            }
+        }
+    }
+#endif
     buf_vbo_num_tris++;
 }
 
@@ -3934,17 +4059,19 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
                 const uint32_t cms = rdp.texture_tile.cms, cmt = rdp.texture_tile.cmt;
 #endif
 #ifdef PM64
+                /* Another unit may share this cache node, so the node's last
+                 * modes alone do not describe this unit's current state. */
                 pm_set_sampler(i, linear_filter, cms, cmt);
                 rendering_state.textures[i]->linear_filter = linear_filter;
                 rendering_state.textures[i]->cms = cms;
                 rendering_state.textures[i]->cmt = cmt;
 #else
                 if (linear_filter != rendering_state.textures[i]->linear_filter || cms != rendering_state.textures[i]->cms || cmt != rendering_state.textures[i]->cmt) {
-                gfx_flush();
-                gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
-                rendering_state.textures[i]->linear_filter = linear_filter;
-                rendering_state.textures[i]->cms = cms;
-                rendering_state.textures[i]->cmt = cmt;
+                    gfx_flush();
+                    gfx_rapi->set_sampler_parameters(i, linear_filter, cms, cmt);
+                    rendering_state.textures[i]->linear_filter = linear_filter;
+                    rendering_state.textures[i]->cms = cms;
+                    rendering_state.textures[i]->cmt = cmt;
                 }
 #endif
             }
@@ -4826,6 +4953,19 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     }
 }
 
+static struct PM64DiagTextureInfo gfx_diag_rect_texture(const struct TextureHashmapNode *node, int unit) {
+    struct PM64DiagTextureInfo x = {0};
+    int w = 0, h = 0;
+    if (!node) return x;
+    gfx_soft_tex_size(unit, &w, &h);
+    x.id = node->texture_id; x.key = node->diag_key; x.source_hash = node->content_hash;
+    x.import_wh = node->diag_import_wh;
+    x.soft_wh = ((uint32_t)(w < 0 ? 0 : w) << 16) | (uint32_t)(h < 0 ? 0 : h);
+    x.tile_params = (node->fmt & 0xffu) | ((uint32_t)node->siz << 8) | ((uint32_t)node->mirror << 16) | ((uint32_t)(unit & 0xff) << 24);
+    x.result = node->diag_result;
+    return x;
+}
+
 static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
     if (gfx_debug_frame) port_log("  texrect othermode_l %08X h %08X combine %08X\n", (unsigned) rdp.other_mode_l, (unsigned) rdp.other_mode_h, (unsigned) rdp.combine_mode);
     _UNUSED(tile);
@@ -4899,6 +5039,13 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         if (!draw) { rdp.combine_mode = saved_combine_mode; return; }
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry);
+#ifdef PM64
+    { const struct PM64DiagTextureInfo u0 = gfx_diag_rect_texture(rendering_state.textures[0], 0);
+      const struct PM64DiagTextureInfo u1 = gfx_diag_rect_texture(rendering_state.textures[1], 1);
+      pm64_diag_texrect_event(tile, ulx, uly, lrx, lry, uls, ult, dsdx, dtdy, &u0, &u1,
+                              rdp.combine_mode, rdp.other_mode_h, rdp.other_mode_l,
+                              rdp.texture_tile.cms_raw, rdp.texture_tile.cmt_raw); }
+#endif
     rdp.combine_mode = saved_combine_mode;
 }
 
@@ -5575,6 +5722,7 @@ void gfx_overlay_state_dirty(void) {
  * Then forget cached GE state so the whole pipeline is re-sent. */
 void gfx_savestate_fixup(void) {
     { extern void port_state_loaded(void) __attribute__((weak)); if (port_state_loaded) port_state_loaded(); } /* PM64: the asset region's pages */
+    pm64_diag_state_loaded();
     gfx_texture_cache_reset(false);
     gfx_overlay_state_dirty();
 }

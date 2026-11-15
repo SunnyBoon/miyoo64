@@ -6,6 +6,7 @@
 #include "nu/nusys.h"
 #include "port.h"
 #include "game_modes.h"
+#include "world/area_kzn/kzn.h"
 
 void gfxRetrace_Callback(s32 gfxTaskNum);
 void gfxPreNMI_Callback(void);
@@ -36,6 +37,43 @@ void port_game_retrace(void) {
     if (nuGfxFunc != NULL) nuGfxFunc(nuGfxTaskSpool);
     port_audio_out_retrace();
     port_audio_retrace();
+}
+
+/* Called only between game frames while the engine is live. */
+extern s16 gMapTransitionState;
+void pm64_event_snapshot(struct PM64EventSnapshot *out) {
+    s16 kzn_area, kzn_map;
+    out->valid = 0;
+    out->vulkan_map = -1;
+    out->vulkan_flags_valid = 0;
+    out->vulkan_scripts_valid = 0;
+    if (gGameStatusPtr == NULL) return;
+    out->area = gGameStatusPtr->areaID;
+    out->map = gGameStatusPtr->mapID;
+    out->mode = get_game_mode();
+    out->transition = gMapTransitionState;
+    out->input_disabled = gPlayerStatus.inputDisabledCount;
+    out->player_flags = gPlayerStatus.flags;
+    out->override_flags = gOverrideFlags;
+    out->action = gPlayerStatus.actionState;
+    out->partner_action = gPartnerStatus.partnerActionState;
+    if (get_map_IDs_by_name("kzn_17", &kzn_area, &kzn_map)) {
+        out->vulkan_map = out->area == kzn_area && out->map == kzn_map;
+        if (out->vulkan_map && out->mode == GAME_MODE_WORLD &&
+            gGameStatusPtr->context == CONTEXT_WORLD) {
+            out->vulkan_stop_player = get_area_flag(AF_KZN_Tromp2_StopPlayer - AreaFlag(0));
+            out->vulkan_rolling_done = get_area_flag(AF_KZN_TrompRollingDone - AreaFlag(0));
+            out->vulkan_flags_valid = 1;
+        }
+    }
+    out->valid = 1;
+}
+
+/* The scheduler can run after the engine snapshot; reject map/context changes. */
+int pm64_event_kzn17_ready(const struct PM64EventSnapshot *out) {
+    return out->vulkan_flags_valid && gGameStatusPtr != NULL &&
+           gGameStatusPtr->areaID == out->area && gGameStatusPtr->mapID == out->map &&
+           gGameStatusPtr->context == CONTEXT_WORLD && get_game_mode() == GAME_MODE_WORLD;
 }
 
 /* The intro logos (the N64 cube, Nintendo, Intelligent Systems): state_logos.c draws them in the middle of the
@@ -77,4 +115,11 @@ extern f32 gCurtainScale; /* curtains.c: the theatre curtains (the logos' end, t
 int port_letterbox_standard(void) {
     return stretch_on() && sLbFrame == port_frame && sLbX0 == 12 && sLbY0 == 20 && sLbX1 == 308 && sLbY1 == 220 &&
            gCurtainScale >= 1.9f;
+}
+
+int pm64_probe_map(void) {
+    s16 area, map;
+    return gGameStatusPtr != NULL && get_game_mode() == GAME_MODE_WORLD &&
+        gGameStatusPtr->context == CONTEXT_WORLD && get_map_IDs_by_name("kzn_17", &area, &map) &&
+        gGameStatusPtr->areaID == area && gGameStatusPtr->mapID == map;
 }

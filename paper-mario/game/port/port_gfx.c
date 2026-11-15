@@ -3,10 +3,13 @@
  * frame is written as a PPM when PM64_SHOTS=<dir> is set, as a square (the area-filtered 4->3 squeeze the
  * bench uses); the device presents through SDL 1.2 (port_sdl.c). */
 #include <stdbool.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <PR/ultratypes.h>
 #include <PR/gbi.h>
 #include "gfx_pc.h"
@@ -20,6 +23,7 @@
 extern struct GfxRenderingAPI gfx_soft_api;
 extern uint32_t *gfx_soft_get_framebuffer(int *w, int *h);
 extern uint16_t gFrameBuf0[], gFrameBuf1[], gFrameBuf2[];
+extern const uint32_t port_build_stamp;
 
 float identity_matrix[4][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } };
 
@@ -277,6 +281,411 @@ static void depth_query_resolve(void) {
     sDqN = 0;
 }
 
+/* M2.2 has one bounded capture context.  It is entirely SAVESTATE_EXCLUDE: a
+ * load never restores a half-open host file or stale renderer pointer. */
+enum { PM64_DIAG_RENDER_FOCUS = 1, PM64_DIAG_TIMELINE = 2, PM64_DIAG_RAW_COMPAT = 3 };
+enum { PM64_DIAG_MAX_RECORDS = 768, PM64_DIAG_TIMELINE_SWAPS = 360, PM64_DIAG_TEX_HISTORY = 16 };
+enum { PM64_DIAG_READY, PM64_DIAG_ARMED, PM64_DIAG_RECORDING, PM64_DIAG_BUSY, PM64_DIAG_SAVED, PM64_DIAG_FAILED };
+static struct {
+    int armed, active, stop_requested;
+    int event_start_pending, event_end_pending, event_end_wait;
+    struct PM64EventSnapshot event_start, event_end;
+    unsigned mode, state, seq, records, swap_start, game_start, last_game;
+    unsigned bind_records, hit_records, texrect_records, critical_records, dropped_records;
+    unsigned reload_generation, reload_game, reload_swap, cache_epoch;
+    unsigned baseline_seq, baseline_reload_generation, baseline_game, last_swap;
+    unsigned import_records, rect_records, history_head, history_count;
+    struct { char kind[16]; struct PM64DiagTextureInfo info; } history[PM64_DIAG_TEX_HISTORY];
+    char dir[512], group[32], role[32], reason[32];
+    uint8_t seen_hits[512];
+    unsigned last_bind[2];
+    FILE *log;
+} sDiag SAVESTATE_EXCLUDE;
+int pm64_diag_event_pending SAVESTATE_EXCLUDE;
+static struct { unsigned count; struct PM64ProbeRow rows[PM64_PROBE_LIMIT]; } sProbe SAVESTATE_EXCLUDE;
+int pm64_probe_active(void) { return sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sProbe.count < PM64_PROBE_LIMIT; }
+void pm64_probe_store(const struct PM64ProbeRow *row) {
+    if (!pm64_probe_active() || !row) return;
+    sProbe.rows[sProbe.count] = *row;
+    sProbe.rows[sProbe.count].call = sProbe.count + 1;
+    sProbe.count++;
+}
+static void pm64_probe_value(FILE *f, const struct PM64ProbeValues *v) {
+    if (!v->valid) { fputs("null", f); return; }
+    fprintf(f, "{\"id\":%d,\"ptrCurLine\":\"0x%llx\",\"ptrNextLine\":\"0x%llx\",\"curOpcode\":%d,\"stateFlags\":%d,\"frameCounter\":", v->id, (unsigned long long)v->cur, (unsigned long long)v->next, v->opcode, v->flags);
+    if (isfinite(v->counter)) fprintf(f, "%.9g", (double)v->counter); else fputs("null", f);
+    fputs(",\"timeScale\":", f);
+    if (isfinite(v->scale)) fprintf(f, "%.9g", (double)v->scale); else fputs("null", f);
+    fprintf(f, ",\"LVar1\":%d,\"LVarE\":%d,\"LVarF\":%d}", v->lvar1, v->lvare, v->lvarf);
+}
+static void pm64_probe_write(void) {
+    char path[600]; snprintf(path, sizeof path, "%s/scheduler_probe.json", sDiag.dir);
+    FILE *f = fopen(path, "w"); if (!f) return;
+    fprintf(f, "{\"schema\":1,\"limit\":16,\"scheduler_reached\":%s,\"samples\":[", sProbe.count ? "true" : "false");
+    for (unsigned i = 0; i < sProbe.count && i < PM64_PROBE_LIMIT; i++) {
+        const struct PM64ProbeRow *r = &sProbe.rows[i];
+        const char *reasons[] = { "none", "debug_no_update", "id_changed", "flags", "insufficient_frame_counter", "multiple_targets" };
+        fprintf(f, "%s{\"scheduler_call\":%u,\"present\":%s,\"reached\":%s,\"invoked\":%s,\"error_before_target\":%s,\"skip_reason\":\"%s\",\"before\":", i ? "," : "", r->call, r->present ? "true":"false", r->reached ? "true":"false", r->invoked ? "true":"false", r->error_before ? "true":"false", r->reason >= 0 && r->reason < 6 ? reasons[r->reason] : "unknown");
+        pm64_probe_value(f, &r->before); fputs(",\"after\":", f); pm64_probe_value(f, &r->after); fputc('}', f);
+    }
+    fputs("]}\n", f); fclose(f);
+}
+extern int gfx_trace_frames;
+extern void port_trace_file(FILE *f);
+
+const char *pm64_diag_mode_name(unsigned mode) {
+    switch (mode) {
+        case PM64_DIAG_RENDER_FOCUS: return "RENDER FOCUS";
+        case PM64_DIAG_TIMELINE: return "TIMELINE";
+        case PM64_DIAG_RAW_COMPAT: return "RAW COMPAT";
+        default: return "UNKNOWN";
+    }
+}
+const char *pm64_diag_state_name(void) {
+    switch (sDiag.state) {
+        case PM64_DIAG_ARMED: return "ARMED";
+        case PM64_DIAG_RECORDING: return "RECORDING";
+        case PM64_DIAG_BUSY: return "BUSY";
+        case PM64_DIAG_SAVED: return "SAVED";
+        case PM64_DIAG_FAILED: return "FAILED";
+        default: return "READY";
+    }
+}
+int pm64_diag_request(unsigned mode) {
+    if (mode < PM64_DIAG_RENDER_FOCUS || mode > PM64_DIAG_RAW_COMPAT) {
+        sDiag.state = PM64_DIAG_FAILED; snprintf(sDiag.reason, sizeof sDiag.reason, "bad_mode"); return 0;
+    }
+    if (sDiag.armed || sDiag.active || sDiag.event_end_pending || gfx_trace_frames) {
+        sDiag.state = PM64_DIAG_BUSY; snprintf(sDiag.reason, sizeof sDiag.reason, "capture_active"); return 0;
+    }
+    sDiag.mode = mode;
+    sDiag.armed = 1;
+    sDiag.stop_requested = 0;
+    sDiag.state = PM64_DIAG_ARMED;
+    snprintf(sDiag.reason, sizeof sDiag.reason, "armed");
+    return 1;
+}
+/* A second A on an active timeline is an explicit, safe finish request. */
+int pm64_diag_stop_request(void) {
+    if (!sDiag.active || sDiag.mode != PM64_DIAG_TIMELINE) return 0;
+    sDiag.stop_requested = 1;
+    sDiag.state = PM64_DIAG_BUSY;
+    snprintf(sDiag.reason, sizeof sDiag.reason, "stop_requested");
+    return 1;
+}
+/* Compatibility for existing out-of-tree menu patches. */
+int pm64_qtrace_request(void) { return pm64_diag_request(PM64_DIAG_RAW_COMPAT); }
+int pm64_qtrace_request_profile(unsigned profile) { (void) profile; return pm64_diag_request(PM64_DIAG_RENDER_FOCUS); }
+
+static void diag_write_metadata(uint32_t swap, const char *status, const char *reason, int screenshot) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/metadata.json", sDiag.dir);
+    FILE *m = fopen(path, "w");
+    if (!m) return;
+    fprintf(m, "{\"diag_schema\":4,\"trace_id\":%u,\"diag_mode\":\"%s\",\"session_id\":\"m221-%08u\",\"comparison_group\":\"%s\",\"capture_role\":\"%s\",\"app\":\"PaperMarioPALAlpha045DiagM221\",\"build\":\"PAL-0.4.5-DIAG-M221\",\"build_stamp\":\"%08X\",\"swap_frame_start\":%u,\"swap_frame_end\":%u,\"game_frame_start\":%u,\"game_frame_end\":%u,\"reload_generation\":%u,\"reload_game_frame\":%u,\"cache_epoch\":%u,\"records\":%u,\"dropped_records\":%u,\"trace\":\"trace.log\",\"framebuffer\":%s,\"capture_status\":\"%s\",\"completion_reason\":\"%s\"}\n",
+            sDiag.seq, pm64_diag_mode_name(sDiag.mode), sDiag.seq, sDiag.group, sDiag.role,
+            (unsigned)port_build_stamp, sDiag.swap_start, swap, sDiag.game_start, (unsigned)port_frame,
+            sDiag.reload_generation, sDiag.reload_game, sDiag.cache_epoch, sDiag.records, sDiag.dropped_records,
+            screenshot ? "\"frame.ppm\"" : "null", status, reason);
+    fclose(m);
+}
+static int diag_begin(uint32_t swap) {
+    const char *base = getenv("PM64_TRACE_DIR");
+    if (!base || !*base) { snprintf(sDiag.reason, sizeof sDiag.reason, "no_trace_dir"); return 0; }
+    for (int i = 0; i < 100000; i++) {
+        unsigned n = ++sDiag.seq;
+        if (snprintf(sDiag.dir, sizeof sDiag.dir, "%s/trace_%06u", base, n) >= (int)sizeof sDiag.dir) { snprintf(sDiag.reason, sizeof sDiag.reason, "path_too_long"); return 0; }
+        if (mkdir(sDiag.dir, 0755) == 0) break;
+        if (errno != EEXIST || i == 99999) { snprintf(sDiag.reason, sizeof sDiag.reason, "mkdir_failed"); return 0; }
+    }
+    char path[600]; snprintf(path, sizeof path, "%s/trace.log", sDiag.dir);
+    sDiag.log = fopen(path, "wx");
+    if (!sDiag.log) { snprintf(sDiag.reason, sizeof sDiag.reason, "log_open_failed"); return 0; }
+    setvbuf(sDiag.log, NULL, _IOLBF, 0);
+    port_trace_file(sDiag.log);
+    sDiag.active = 1; sDiag.armed = 0; sDiag.stop_requested = 0; sDiag.records = 0;
+    sDiag.bind_records = sDiag.hit_records = sDiag.texrect_records = sDiag.critical_records = sDiag.dropped_records = 0;
+    memset(sDiag.seen_hits, 0, sizeof sDiag.seen_hits); sDiag.last_bind[0] = sDiag.last_bind[1] = ~0u;
+    sDiag.state = PM64_DIAG_RECORDING;
+    sDiag.swap_start = swap; sDiag.last_swap = swap; sDiag.game_start = port_frame; sDiag.last_game = port_frame;
+    if (sDiag.mode == PM64_DIAG_RENDER_FOCUS) {
+        if (sDiag.baseline_seq && sDiag.reload_generation == sDiag.baseline_reload_generation + 1 &&
+            port_frame >= sDiag.reload_game && port_frame - sDiag.reload_game <= 900) {
+            snprintf(sDiag.group, sizeof sDiag.group, "focus-%08u", sDiag.baseline_seq);
+            snprintf(sDiag.role, sizeof sDiag.role, "after_reload_observed");
+        } else {
+            snprintf(sDiag.group, sizeof sDiag.group, "focus-%08u", sDiag.seq);
+            snprintf(sDiag.role, sizeof sDiag.role, "before_reload_candidate");
+        }
+    } else { sDiag.group[0] = 0; snprintf(sDiag.role, sizeof sDiag.role, "manual"); }
+    if (sDiag.mode == PM64_DIAG_TIMELINE) {
+        memset(&sProbe, 0, sizeof sProbe);
+        memset(&sDiag.event_start, 0, sizeof sDiag.event_start);
+        memset(&sDiag.event_end, 0, sizeof sDiag.event_end);
+        sDiag.event_start_pending = 1;
+        pm64_diag_event_pending = 1;
+    }
+    diag_write_metadata(swap, "started", "armed_swap", 0);
+    port_log("M22 BEGIN session=m221-%08u mode=%s build_stamp=%08X swap=%u game=%u reload=%u epoch=%u\n", sDiag.seq,
+             pm64_diag_mode_name(sDiag.mode), (unsigned)port_build_stamp, swap, (unsigned)port_frame, sDiag.reload_generation, sDiag.cache_epoch);
+    if (sDiag.mode == PM64_DIAG_RENDER_FOCUS) {
+        unsigned n = sDiag.history_count;
+        unsigned first = (sDiag.history_head + PM64_DIAG_TEX_HISTORY - n) % PM64_DIAG_TEX_HISTORY;
+        for (unsigned i = 0; i < n; i++) {
+            const unsigned p = (first + i) % PM64_DIAG_TEX_HISTORY;
+            const struct PM64DiagTextureInfo *x = &sDiag.history[p].info;
+            port_log("M22 HISTORY kind=%s id=%u key=%08X source=%08X import=%ux%u soft=%ux%u tile=%08X result=%u epoch=%u\n", sDiag.history[p].kind, x->id, x->key, x->source_hash, x->import_wh >> 16, x->import_wh & 0xffff, x->soft_wh >> 16, x->soft_wh & 0xffff, x->tile_params, x->result, sDiag.cache_epoch);
+        }
+    }
+    if (sDiag.mode == PM64_DIAG_RAW_COMPAT) gfx_trace_frames = 1;
+    return 1;
+}
+static int diag_screenshot(void) {
+    char path[600]; snprintf(path, sizeof path, "%s/frame.ppm", sDiag.dir);
+    FILE *f = fopen(path, "wx");
+    int w=0, h=0, ok=0;
+    const uint32_t *fb = gfx_soft_get_framebuffer(&w, &h);
+    if (f && fb && w == 320 && h == 240) {
+        ok = fprintf(f, "P6\n%d %d\n255\n", w, h) > 0;
+        for (int y=0; y<h && ok; y++) for (int x=0; x<w; x++) {
+            uint32_t p=fb[y*w+x]; unsigned char rgb[3]={p>>16,p>>8,p};
+            if (fwrite(rgb, 1, 3, f) != 3) { ok=0; break; }
+        }
+    }
+    if (f && fclose(f)) ok=0;
+    return ok;
+}
+/* At most 32 entries per section; integer widths and pointer widths are fixed.
+ * Including Vulkan details, the document is below 32768 bytes on a 64-bit host. */
+static void diag_vulkan_script(FILE *f, const struct PM64EventSnapshot *x, int which) {
+    const struct PM64EventScript *e = &x->vulkan_scripts[which];
+    const int count = x->vulkan_matches[which];
+    if (!x->vulkan_scripts_valid) { fputs("{\"status\":\"unavailable\"}", f); return; }
+    if (count == 0) { fputs("{\"status\":\"not_active\",\"count\":0}", f); return; }
+    if (count != 1) { fprintf(f, "{\"status\":\"ambiguous\",\"count\":%d}", count); return; }
+    fprintf(f, "{\"status\":\"active\",\"count\":1,\"id\":%d,"
+            "\"ptr_first_line\":\"0x%llx\",\"ptr_cur_line\":\"0x%llx\",\"opcode\":",
+            e->id, (unsigned long long)e->first_line, (unsigned long long)e->cur_line);
+    if (e->opcode_known) fprintf(f, "%d", e->opcode); else fputs("null", f);
+    fprintf(f, ",\"state_flags\":%u,\"paused\":%s,\"suspended\":%s,"
+            "\"blocked_by_child\":%s,\"blocked\":", e->state_flags,
+            (e->state_flags & 0x02) ? "true" : "false",
+            (e->state_flags & 0x80) ? "true" : "false",
+            (e->state_flags & 0x10) ? "true" : "false");
+    if (e->blocked_known) fputs(e->blocked ? "true" : "false", f); else fputs("null", f);
+    fputc('}', f);
+}
+static void diag_event_vulkan(FILE *f, const struct PM64EventSnapshot *x) {
+    if (x->vulkan_map < 0) { fputs("{\"status\":\"unavailable\"}", f); return; }
+    if (!x->vulkan_map) { fputs("{\"status\":\"not_applicable\"}", f); return; }
+    fputs("{\"status\":\"applicable\",\"AF_KZN_Tromp2_StopPlayer\":", f);
+    if (x->vulkan_flags_valid) fputs(x->vulkan_stop_player ? "true" : "false", f); else fputs("null", f);
+    fputs(",\"AF_KZN_TrompRollingDone\":", f);
+    if (x->vulkan_flags_valid) fputs(x->vulkan_rolling_done ? "true" : "false", f); else fputs("null", f);
+    fputs(",\"scripts\":{\"EVS_SetupSpinyTromp\":", f);
+    diag_vulkan_script(f, x, PM64_KZN_SETUP);
+    fputs(",\"D_80240D10_C7EE90\":", f);
+    diag_vulkan_script(f, x, PM64_KZN_HIT);
+    fputs(",\"EVS_Kolorado_TrompImpact\":", f);
+    diag_vulkan_script(f, x, PM64_KZN_KOLORADO);
+    fputs(",\"stop_player_thread\":{\"status\":\"not_uniquely_identifiable\"}}}", f);
+}
+static void diag_event_section(FILE *f, const struct PM64EventSnapshot *x) {
+    if (!x->valid) { fputs("null", f); return; }
+    fprintf(f, "{\"area_id\":%d,\"map_id\":%d,\"game_mode\":%d,"
+            "\"map_transition_state\":%d,\"input_disabled_count\":%d,"
+            "\"player_flags\":%u,\"override_flags\":%u,\"action_state\":%d,"
+            "\"partner_action_state\":%d,\"vulkan\":",
+            x->area, x->map, x->mode, x->transition, x->input_disabled,
+            (unsigned)x->player_flags, (unsigned)x->override_flags, x->action, x->partner_action);
+    diag_event_vulkan(f, x);
+    fputs(",\"scripts\":", f);
+    if (!x->scripts_valid) { fputs("null}", f); return; }
+    int n = x->script_captured;
+    if (n < 0) n = 0;
+    if (n > PM64_EVENT_SCRIPT_LIMIT) n = PM64_EVENT_SCRIPT_LIMIT;
+    fprintf(f, "{\"count\":%d,\"truncated\":%s,\"entries\":[", x->script_count,
+            x->script_count > n ? "true" : "false");
+    for (int i = 0; i < n; i++) {
+        const struct PM64EventScript *e = &x->scripts[i];
+        fprintf(f, "%s{\"id\":%d,\"ptr_first_line\":\"0x%llx\",\"ptr_cur_line\":\"0x%llx\","
+                "\"opcode\":", i ? "," : "", e->id,
+                (unsigned long long)e->first_line, (unsigned long long)e->cur_line);
+        if (e->opcode_known) fprintf(f, "%d", e->opcode); else fputs("null", f);
+        fprintf(f, ",\"state_flags\":%u,\"parent_id\":", e->state_flags);
+        if (e->parent_known) fprintf(f, "%d", e->parent_id); else fputs("null", f);
+        fputs(",\"child_id\":", f);
+        if (e->child_known) fprintf(f, "%d", e->child_id); else fputs("null", f);
+        fprintf(f, ",\"paused\":%s,\"suspended\":%s,\"blocked_by_child\":%s,\"blocked\":",
+                (e->state_flags & 0x02) ? "true" : "false",
+                (e->state_flags & 0x80) ? "true" : "false",
+                (e->state_flags & 0x10) ? "true" : "false");
+        if (e->blocked_known) fputs(e->blocked ? "true" : "false", f); else fputs("null", f);
+        fputc('}', f);
+    }
+    fputs("]}}", f);
+}
+static void diag_write_event_state(void) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/event_state.json", sDiag.dir);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fputs("{\"schema\":3,\"sampling\":\"next_game_tick\",\"script_sampling\":\"next_script_update\",\"start\":", f);
+    diag_event_section(f, &sDiag.event_start);
+    fputs(",\"end\":", f);
+    diag_event_section(f, &sDiag.event_end);
+    fputs("}\n", f);
+    fclose(f);
+}
+/* Called only by the scheduler after its loop, on the game thread. */
+void pm64_diag_event_scheduler(void) {
+    struct PM64EventSnapshot *out;
+    if (pm64_diag_event_pending == 1 && sDiag.active && sDiag.event_start_pending) {
+        out = &sDiag.event_start;
+        sDiag.event_start_pending = 0;
+    } else if (pm64_diag_event_pending == 2 && sDiag.event_end_pending) {
+        out = &sDiag.event_end;
+    } else {
+        pm64_diag_event_pending = 0;
+        return;
+    }
+    if (!out->valid) pm64_event_snapshot(out);
+    if (out->valid) pm64_event_collect_scripts(out);
+    pm64_diag_event_pending = 0;
+}
+static void diag_end_ex(uint32_t swap, const char *reason, int screenshot) {
+    const int ok = screenshot ? diag_screenshot() : 0;
+    if (sDiag.mode == PM64_DIAG_TIMELINE) {
+        pm64_probe_write();
+        sDiag.event_start_pending = 0; /* no later scheduler: scripts stay unknown */
+        sDiag.event_end_pending = 1;
+        sDiag.event_end_wait = 1;
+        pm64_diag_event_pending = 2;
+    }
+    port_log("M22 END session=m221-%08u mode=%s records=%u dropped=%u swap=%u game=%u reason=%s ppm=%s\n", sDiag.seq,
+             pm64_diag_mode_name(sDiag.mode), sDiag.records, sDiag.dropped_records, swap, (unsigned)port_frame, reason, ok ? "ok" : "error");
+    diag_write_metadata(swap, screenshot ? (ok ? "complete" : "error") : "partial", reason, ok);
+    port_trace_file(NULL);
+    if (sDiag.log) fclose(sDiag.log);
+    sDiag.log = NULL; sDiag.active = 0; sDiag.armed = 0; sDiag.stop_requested = 0;
+    sDiag.state = ok ? PM64_DIAG_SAVED : PM64_DIAG_FAILED;
+    snprintf(sDiag.reason, sizeof sDiag.reason, "%s", reason);
+    if (sDiag.mode == PM64_DIAG_RENDER_FOCUS && strcmp(sDiag.role, "before_reload_candidate") == 0 && ok) {
+        sDiag.baseline_seq = sDiag.seq;
+        sDiag.baseline_reload_generation = sDiag.reload_generation;
+        sDiag.baseline_game = port_frame;
+    }
+}
+static void diag_end(uint32_t swap, const char *reason) { diag_end_ex(swap, reason, 1); }
+void pm64_diag_app_exit(void) {
+    if (!sDiag.active && !sDiag.event_end_pending) return;
+    if (sDiag.event_end_pending) {
+        sDiag.event_end_pending = 0;
+        pm64_diag_event_pending = 0;
+        diag_write_event_state();
+        return;
+    }
+    /* The video backend may already be winding down: close evidence faithfully
+     * without claiming that a final framebuffer was captured. */
+    diag_end_ex(sDiag.last_swap, "app_exit", 0);
+    if (sDiag.event_end_pending) {
+        sDiag.event_end_pending = 0;
+        pm64_diag_event_pending = 0;
+        diag_write_event_state();
+    }
+}
+void pm64_diag_state_loaded(void) {
+    /* Keep a tiny history across sessions: a following focus capture is linked
+     * only to one observed load after one completed baseline, never guessed. */
+    sDiag.reload_generation++; sDiag.reload_game = port_frame; sDiag.reload_swap = sDiag.swap_start;
+    if (sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sDiag.records < PM64_DIAG_MAX_RECORDS) {
+        sDiag.records++;
+        port_log("M21 TIMELINE n=%u event=savestate_load generation=%u game=%u\n", sDiag.records, sDiag.reload_generation, (unsigned)port_frame);
+    }
+    if (sDiag.active) pm64_diag_render_event("savestate_load", sDiag.reload_generation, 0, 0, 0);
+}
+int pm64_diag_render_focus_active(void) { return sDiag.active && sDiag.mode == PM64_DIAG_RENDER_FOCUS; }
+static int diag_focus_admit(const char *kind, unsigned a, unsigned b) {
+    if (strcmp(kind, "texrect") == 0) {
+        if (sDiag.texrect_records >= 320) return 0;
+        sDiag.texrect_records++; return 1;
+    }
+    if (strcmp(kind, "bind") == 0) {
+        unsigned unit = b & 1u;
+        if (sDiag.last_bind[unit] == a || sDiag.bind_records >= 96) return 0;
+        sDiag.last_bind[unit] = a; sDiag.bind_records++; return 1;
+    }
+    if (strcmp(kind, "cache_hit") == 0) {
+        unsigned slot = a & 4095u, mask = 1u << (slot & 7u);
+        if ((sDiag.seen_hits[slot >> 3] & mask) || sDiag.hit_records >= 128) return 0;
+        sDiag.seen_hits[slot >> 3] |= mask; sDiag.hit_records++; return 1;
+    }
+    /* Resets, imports and uploads establish state; reserve room for them. */
+    if (sDiag.critical_records >= 192) return 0;
+    sDiag.critical_records++; return 1;
+}
+void pm64_diag_render_event(const char *kind, unsigned a, unsigned b, unsigned c, unsigned d) {
+    if (strcmp(kind, "cache_reset") == 0) sDiag.cache_epoch = a;
+    if (!pm64_diag_render_focus_active()) return;
+    if (sDiag.records >= PM64_DIAG_MAX_RECORDS || !diag_focus_admit(kind, a, b)) { sDiag.dropped_records++; return; }
+    sDiag.records++;
+    port_log("M21 RENDER n=%u kind=%s a=%u b=%u c=%u d=%u game=%u epoch=%u\n", sDiag.records, kind, a, b, c, d, (unsigned)port_frame, sDiag.cache_epoch);
+}
+static int diag_texture_admit(const char *kind) {
+    if (strcmp(kind, "texrect") == 0) { if (sDiag.rect_records >= 320) return 0; sDiag.rect_records++; return 1; }
+    if (sDiag.import_records >= 192) return 0;
+    sDiag.import_records++; return 1;
+}
+void pm64_diag_texture_event(const char *kind, const struct PM64DiagTextureInfo *x) {
+    if (!x) return;
+    if (strcmp(kind, "cache_reset") == 0) sDiag.cache_epoch = x->result;
+    /* A tiny rolling import/reset history bridges a state load that happens
+     * before the operator opens the following Focus capture. */
+    if (strcmp(kind, "cache_hit") != 0) {
+        unsigned p = sDiag.history_head++ % PM64_DIAG_TEX_HISTORY;
+        snprintf(sDiag.history[p].kind, sizeof sDiag.history[p].kind, "%s", kind);
+        sDiag.history[p].info = *x;
+        if (sDiag.history_count < PM64_DIAG_TEX_HISTORY) sDiag.history_count++;
+    }
+    if (!pm64_diag_render_focus_active()) return;
+    if (sDiag.records >= PM64_DIAG_MAX_RECORDS || !diag_texture_admit(kind)) { sDiag.dropped_records++; return; }
+    sDiag.records++;
+    port_log("M22 TEX n=%u kind=%s id=%u key=%08X source=%08X import=%ux%u soft=%ux%u tile=%08X result=%u game=%u epoch=%u\n", sDiag.records, kind, x->id, x->key, x->source_hash, x->import_wh >> 16, x->import_wh & 0xffff, x->soft_wh >> 16, x->soft_wh & 0xffff, x->tile_params, x->result, (unsigned)port_frame, sDiag.cache_epoch);
+}
+void pm64_diag_texrect_event(uint32_t tile, int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, const struct PM64DiagTextureInfo *a, const struct PM64DiagTextureInfo *b, uint32_t combine, uint32_t other_h, uint32_t other_l, uint32_t cms, uint32_t cmt) {
+    if (!pm64_diag_render_focus_active()) return;
+    if (sDiag.records >= PM64_DIAG_MAX_RECORDS || !diag_texture_admit("texrect")) { sDiag.dropped_records++; return; }
+    sDiag.records++;
+    port_log("M22 RECT n=%u tile=%u xy=%d,%d,%d,%d uv=%d,%d,%d,%d u0=id:%u,key:%08X,src:%08X,import:%ux%u,soft:%ux%u,result:%u u1=id:%u,key:%08X,src:%08X,import:%ux%u,soft:%ux%u,result:%u combine=%08X other=%08X/%08X sampler=%08X/%08X game=%u epoch=%u\n", sDiag.records, tile, ulx, uly, lrx, lry, uls, ult, dsdx, dtdy, a ? a->id : 0, a ? a->key : 0, a ? a->source_hash : 0, a ? a->import_wh >> 16 : 0, a ? a->import_wh & 0xffff : 0, a ? a->soft_wh >> 16 : 0, a ? a->soft_wh & 0xffff : 0, a ? a->result : 0, b ? b->id : 0, b ? b->key : 0, b ? b->source_hash : 0, b ? b->import_wh >> 16 : 0, b ? b->import_wh & 0xffff : 0, b ? b->soft_wh >> 16 : 0, b ? b->soft_wh & 0xffff : 0, b ? b->result : 0, combine, other_h, other_l, cms, cmt, (unsigned)port_frame, sDiag.cache_epoch);
+}
+void pm64_diag_game_tick(void) {
+    if (sDiag.event_start_pending && sDiag.active && !sDiag.event_start.valid)
+        pm64_event_snapshot(&sDiag.event_start);
+    if (sDiag.event_end_pending && !sDiag.event_end.valid)
+        pm64_event_snapshot(&sDiag.event_end);
+    if (sDiag.event_end_pending) {
+        /* One more game frame permits an update after a render-path finish.
+         * If no scheduler runs, preserve an explicitly unknown end state. */
+        if (pm64_diag_event_pending != 2 || !sDiag.event_end_wait) {
+            sDiag.event_end_pending = 0;
+            pm64_diag_event_pending = 0;
+            diag_write_event_state();
+        } else {
+            sDiag.event_end_wait--;
+        }
+    }
+    if (sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sDiag.records < PM64_DIAG_MAX_RECORDS && port_frame != sDiag.last_game) {
+        sDiag.last_game = port_frame; sDiag.records++;
+    port_log("M21 TIMELINE n=%u event=game_tick game=%u\n", sDiag.records, (unsigned)port_frame);
+    }
+}
+void pm64_diag_merlee_phase(const char *phase, int a, int b, int c) {
+    if (!sDiag.active || sDiag.mode != PM64_DIAG_TIMELINE || sDiag.records >= PM64_DIAG_MAX_RECORDS) return;
+    sDiag.records++;
+    port_log("M21 TIMELINE n=%u event=merlee phase=%s a=%d b=%d c=%d game=%u\n", sDiag.records, phase, a, b, c, (unsigned)port_frame);
+    if (strcmp(phase, "SCRIPT_DONE") == 0) diag_end(sDiag.swap_start, "script_done");
+}
+
 void port_gfx_task(void *gfx_list, int swap) {
     /* PM64_TRACE_AT=<frame>[,<tasks>]: the renderer's command trace (PM64_TRILOG=1 adds every triangle) for that
      * frame's tasks, frames counted as the shots are (the file select's window flip, M2) */
@@ -295,15 +704,35 @@ void port_gfx_task(void *gfx_list, int swap) {
         }
     }
     if (sTraceAt && (sTraceGame ? port_frame : sFrame) == sTraceAt) {
-        extern int gfx_trace_frames;
+extern int gfx_trace_frames;
         gfx_trace_frames = (int) sTraceN;
         sTraceAt = 0;
     }
-    if (swap) sFrame++;
+    const uint32_t diagFrame = sFrame;
+    if (swap && sDiag.armed && !gfx_trace_frames) {
+        if (!diag_begin(diagFrame)) {
+            sDiag.armed = 0; sDiag.state = PM64_DIAG_FAILED;
+            port_log("M21 ERROR cannot create trace output reason=%s\n", sDiag.reason);
+        }
+    }
+    if (swap) { sDiag.last_swap = diagFrame; sFrame++; }
     const uint32_t perfT0 = port_time_us();
     gfx_start_frame();
     gfx_run((Gfx *) gfx_list);
     gfx_end_frame();
+    if (swap && sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sDiag.records < PM64_DIAG_MAX_RECORDS) {
+        sDiag.records++;
+        port_log("M21 TIMELINE n=%u event=swap swap=%u game=%u\n", sDiag.records, diagFrame, (unsigned)port_frame);
+    }
+    if (swap && sDiag.active && sDiag.mode == PM64_DIAG_RENDER_FOCUS)
+        diag_end(diagFrame, "single_swap");
+    else if (swap && sDiag.active && sDiag.mode == PM64_DIAG_RAW_COMPAT && !gfx_trace_frames)
+        diag_end(diagFrame, "raw_complete");
+    else if (swap && sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sDiag.stop_requested)
+        diag_end(diagFrame, "user_stop");
+    else if (swap && sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE &&
+             (diagFrame - sDiag.swap_start >= PM64_DIAG_TIMELINE_SWAPS || sDiag.records >= PM64_DIAG_MAX_RECORDS))
+        diag_end(diagFrame, sDiag.records >= PM64_DIAG_MAX_RECORDS ? "record_limit" : "timeout");
     if (!swap) { port_perf_gfx_us += port_time_us() - perfT0; return; }
 #ifdef PM64_SDL12
     port_video_present();
