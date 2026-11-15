@@ -324,7 +324,7 @@ index 20dd4afe4..34ccce000 100644
  
  IMG_PTR spr_get_player_raster(s32 rasterIndex, s32 playerSpriteID) {
 diff --git a/src/animator.c b/src/animator.c
-index a3ea4e571..037df7f05 100644
+index a3ea4e571..3421d597b 100644
 --- a/src/animator.c
 +++ b/src/animator.c
 @@ -79,7 +79,7 @@ Vtx* animator_copy_vertices_to_buffer(ModelAnimator* animator, AnimatorNode* nod
@@ -347,7 +347,92 @@ index a3ea4e571..037df7f05 100644
      animator->animReadPos = animPos;
      animator->savedReadPos = animPos;
  
-@@ -1051,7 +1053,7 @@ void clear_animator_flags(s32 index, s32 bits) {
+@@ -497,8 +499,21 @@ void update_model_animator_with_transform(s32 animatorID, Mtx* mtx) {
+     ModelAnimator* animator;
+     s32 temp;
+     s32 i;
++#ifdef PM64_PORT
++    extern int animator_hook_enabled;
++    extern void animator_hook_begin(s32);
++    extern void animator_hook_resolve(s32, const void*, const void*, const void*, float, float);
++    extern void animator_hook_timer(s32, float);
++    extern void animator_hook_command(s32);
++    extern void animator_hook_end(s32, unsigned, const void*, const void*, float);
++    const s32 diagID = animatorID;
++    if (animator_hook_enabled) animator_hook_begin(diagID);
++#endif
+ 
+     if (gGameStatusPtr->context != CONTEXT_WORLD && !(animatorID & BATTLE_ID_BIT)) {
++#ifdef PM64_PORT
++        if (animator_hook_enabled) animator_hook_end(diagID, 1, nullptr, nullptr, 0);
++#endif
+         return;
+     }
+ 
+@@ -506,35 +521,62 @@ void update_model_animator_with_transform(s32 animatorID, Mtx* mtx) {
+     animator = (*gCurrentAnimMeshListPtr)[animatorID];
+ 
+     if (animator == nullptr || animator->flags == 0) {
++#ifdef PM64_PORT
++        if (animator_hook_enabled) {
++            animator_hook_resolve(diagID, animator, animator ? animator->animReadPos : nullptr, animator ? animator->animationBuffer : nullptr, animator ? animator->nextUpdateTime : 0, animator ? animator->timeScale : 0);
++            animator_hook_end(diagID, animator ? 3 : 2, animator, animator ? animator->animReadPos : nullptr, animator ? animator->nextUpdateTime : 0);
++        }
++#endif
+         return;
+     }
+ 
++#ifdef PM64_PORT
++    if (animator_hook_enabled) animator_hook_resolve(diagID, animator, animator->animReadPos, animator->animationBuffer, animator->nextUpdateTime, animator->timeScale);
++#endif
+     if (animator->flags & MODEL_ANIMATOR_FLAG_FREEZE_ANIMATION) {
++#ifdef PM64_PORT
++        if (animator_hook_enabled) animator_hook_end(diagID, 4, animator, animator->animReadPos, animator->nextUpdateTime);
++#endif
+         return;
+     }
+ 
+     animator->flags &= ~MODEL_ANIMATOR_FLAG_UPDATE_PENDING;
+     animator->nextUpdateTime -= animator->timeScale;
++#ifdef PM64_PORT
++    if (animator_hook_enabled) animator_hook_timer(diagID, animator->nextUpdateTime);
++#endif
+ 
+     temp = 0;
+     if (animator->nextUpdateTime <= 0.0f) {
+         if (!(animator->flags & MODEL_ANIMATOR_FLAG_MESH)) {
+             do {
++#ifdef PM64_PORT
++                if (animator_hook_enabled) animator_hook_command(diagID);
++#endif
+                 temp = step_model_animator(animator);
+             } while (temp > 0);
+         } else {
+             animator->nextUpdateTime = 1.0f;
+             reload_mesh_animator_tree(animator);
+             do {
++#ifdef PM64_PORT
++                if (animator_hook_enabled) animator_hook_command(diagID);
++#endif
+                 temp = step_mesh_animator(animator);
+             } while (temp > 0);
+         }
+     }
+     if (temp == -1) {
++#ifdef PM64_PORT
++        if (animator_hook_enabled) animator_hook_end(diagID, 5, animator, animator->animReadPos, animator->nextUpdateTime);
++#endif
+         return;
+     }
+ 
+     animator_update_model_transforms(animator, mtx);
++#ifdef PM64_PORT
++    if (animator_hook_enabled) animator_hook_end(diagID, 6, animator, animator->animReadPos, animator->nextUpdateTime);
++#endif
+ 
+     for (i = 0; i < ARRAY_COUNT(D_801533C0); i++) {
+         if (D_801533C0[i].ttl >= 0) {
+@@ -1051,7 +1093,7 @@ void clear_animator_flags(s32 index, s32 bits) {
  void play_model_animation(s32 index, s16* animPos) {
      ModelAnimator* animator = (*gCurrentAnimMeshListPtr)[index & ~BATTLE_ID_BIT];
  
@@ -356,7 +441,7 @@ index a3ea4e571..037df7f05 100644
          animPos = (s16*) (((s32)animPos & 0xFFFFFF) + (s32)animator->animationBuffer); // TODO: array access? / cleanup
      }
      animator->animReadPos = animPos;
-@@ -1065,7 +1067,7 @@ void play_model_animation_starting_from(s32 index, s16* animPos, s32 framesToSki
+@@ -1065,7 +1107,7 @@ void play_model_animation_starting_from(s32 index, s16* animPos, s32 framesToSki
      ModelAnimator* animator = (*gCurrentAnimMeshListPtr)[indexMasked];
      s32 i;
  
@@ -842,10 +927,10 @@ index 86d6340df..19f8903ed 100644
                  dest++;
  
 diff --git a/src/battle/area/kzn2/actor/lava_piranha.c b/src/battle/area/kzn2/actor/lava_piranha.c
-index fef58ecc5..41eef7e85 100644
+index fef58ecc5..9f1f26567 100644
 --- a/src/battle/area/kzn2/actor/lava_piranha.c
 +++ b/src/battle/area/kzn2/actor/lava_piranha.c
-@@ -333,6 +333,52 @@ void N(make_vine_interpolation)(LavaPiranhaVine* vine) {
+@@ -333,6 +333,65 @@ void N(make_vine_interpolation)(LavaPiranhaVine* vine) {
      vine->numPoints = count;
  }
  
@@ -858,16 +943,22 @@ index fef58ecc5..41eef7e85 100644
 +extern int boss_diag_wants(const void*, s32, unsigned);
 +extern void boss_diag_fail(void);
 +extern void boss_diag_check_frame(unsigned);
++extern void animator_profile_select(const void*, s32);
++extern void animator_profile_unselect(void);
++extern void animator_profile_head(const void*, s32, const float*);
++extern int animator_profile_pending(void);
 +
 +/* These wrappers occur only at the two specific calls in EVS_InitVines. */
 +API_CALLABLE(N(DiagHeadNode)) {
 +    ApiStatus result;
 +    if (script->ptrFirstLine == N(EVS_InitVines)) {
 +        boss_diag_begin(script, script->id, port_frame);
++        animator_profile_select(script, script->id);
 +        boss_diag_select(script, script->id, 1);
 +    }
 +    result = GetAnimatedPositionByTreeIndex(script, isInitialCall);
 +    boss_diag_unselect();
++    animator_profile_unselect();
 +    return result;
 +}
 +API_CALLABLE(N(DiagVineNode)) {
@@ -882,6 +973,13 @@ index fef58ecc5..41eef7e85 100644
 +}
 +API_CALLABLE(N(DiagHeadPosition)) {
 +    ApiStatus result = SetPartPos(script, isInitialCall);
++    if (script->ptrFirstLine == N(EVS_InitVines) && animator_profile_pending()) {
++        ActorPart* part = get_actor_part(get_actor(ACTOR_BOSS), PRT_MAIN);
++        if (part->flags & ACTOR_PART_FLAG_USE_ABSOLUTE_POSITION) {
++            float pos[3] = {part->absolutePos.x, part->absolutePos.y, part->absolutePos.z};
++            animator_profile_head(script, script->id, pos);
++        }
++    }
 +    if (script->ptrFirstLine == N(EVS_InitVines)) boss_diag_check_frame(port_frame);
 +    if (script->ptrFirstLine == N(EVS_InitVines) && boss_diag_wants(script, script->id, 2)) {
 +        Actor* actor = get_actor(ACTOR_BOSS);
@@ -898,7 +996,7 @@ index fef58ecc5..41eef7e85 100644
  API_CALLABLE(N(SetVineBonePos)) {
      Bytecode* args = script->ptrReadPos;
      s32 vineIdx = evt_get_variable(script, *args++);
-@@ -345,6 +391,13 @@ API_CALLABLE(N(SetVineBonePos)) {
+@@ -345,6 +404,13 @@ API_CALLABLE(N(SetVineBonePos)) {
      vine->bonePos[jointIdx].x = x;
      vine->bonePos[jointIdx].y = y;
      vine->bonePos[jointIdx].z = z;
@@ -912,7 +1010,7 @@ index fef58ecc5..41eef7e85 100644
      return ApiStatus_DONE2;
  }
  
-@@ -757,15 +810,24 @@ EvtScript N(EVS_InitVines) = {
+@@ -757,15 +823,24 @@ EvtScript N(EVS_InitVines) = {
      Label(0)
          // ---------------------------------------------------------------
          // set ACTOR_BOSS position and orientation to tip of VINE_0
@@ -1431,13 +1529,14 @@ index 86a10c75e..fa701f85b 100644
      }
  
 diff --git a/src/evt/model_api.c b/src/evt/model_api.c
-index 6861b913a..48513b36c 100644
+index 6861b913a..75e0cea89 100644
 --- a/src/evt/model_api.c
 +++ b/src/evt/model_api.c
-@@ -334,6 +334,21 @@ API_CALLABLE(GetAnimatedPositionByTreeIndex) {
+@@ -334,7 +334,34 @@ API_CALLABLE(GetAnimatedPositionByTreeIndex) {
      evt_set_variable(script, outX, x);
      evt_set_variable(script, outY, y);
      evt_set_variable(script, outZ, z);
+-
 +#ifdef PM64_PORT
 +    {
 +        extern unsigned boss_diag_selected(const void*, s32);
@@ -1453,9 +1552,22 @@ index 6861b913a..48513b36c 100644
 +        }
 +    }
 +#endif
- 
++
++#ifdef PM64_PORT
++    {
++        extern int animator_profile_selected;
++        extern void animator_profile_node(const void*, const void*, const void*, s32, const void*, unsigned, float, float, const float*, const float*, const float*);
++        if (animator_profile_selected && listIndex == 0 && treeIndex == 10) {
++            ModelAnimator* a = get_animator_by_index(model->animModelID);
++            Matrix4f m; float local[3]={node->pos.x,node->pos.y,node->pos.z}; float world[3]={x,y,z};
++            guMtxL2F(m, &model->mtx);
++            animator_profile_node(model,a,node,model->animModelID,model->curAnimData,a->flags,a->nextUpdateTime,a->timeScale,local,world,&m[0][0]);
++        }
++    }
++#endif
      return ApiStatus_DONE2;
  }
+ 
 diff --git a/src/evt/npc_api.c b/src/evt/npc_api.c
 index ad4fc9a1b..4d42acffe 100644
 --- a/src/evt/npc_api.c

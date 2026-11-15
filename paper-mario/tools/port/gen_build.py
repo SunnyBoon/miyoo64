@@ -510,7 +510,7 @@ def write_mac_makefile(plat, units, defs, paths=None, out_dir=None, ovl_segs=())
     paths = paths or BuildPaths()
     region = paths.region
     out_dir = out_dir or paths.local
-    host_side = {'boss_diag.c', 'port_host.c', 'port_rom.c', 'port_gfx.c', 'port_input.c', 'port_segments.c', 'port_sdl.c', 'port_assets_hh.c',
+    host_side = {'animator_sample.c', 'boss_diag.c', 'port_host.c', 'port_rom.c', 'port_gfx.c', 'port_input.c', 'port_segments.c', 'port_sdl.c', 'port_assets_hh.c',
                  'port_mixer.c', 'port_audio_out.c', 'port_hh.c', 'port_state.c'}
     incs = ' '.join(f'-I{p}' for p in (ROOT + '/game/include', DECOMP + f'/ver/{region}/include',
                                          DECOMP + f'/ver/{region}/build/include', DECOMP + '/include', DECOMP + '/src',
@@ -1080,11 +1080,13 @@ def generate(plat, region='us'):
 
         # The port layer (game/port): the game side takes the decomp's headers (as above, -std=gnu11 so the decomp's
         # bool stays its 4-byte enum); the host side takes system headers and the renderer kit's.
-        host_side = {'boss_diag.c', 'port_host.c', 'port_rom.c', 'port_gfx.c', 'port_input.c', 'port_segments.c', 'port_sdl.c', 'port_assets_hh.c',
+        host_side = {'animator_sample.c', 'boss_diag.c', 'port_host.c', 'port_rom.c', 'port_gfx.c', 'port_input.c', 'port_segments.c', 'port_sdl.c', 'port_assets_hh.c',
                      'port_mixer.c', 'port_audio_out.c', 'port_hh.c', 'port_state.c'}
         kit_inc = f'-I{C_ROOT}/bench/kit -I{C_ROOT}/kit/platform -I{C_DECOMP}/include'
         kit_defs = '-DTARGET_HANDHELD=1 -DPM64=1 -DF3DEX_GBI_2=1 -D_LANGUAGE_C=1 -DPORT_NO_FPS=1 -DNON_MATCHING=1 -DAVOID_UB=1'
-        if os.environ.get('PM64_BOSS_DIAG_M24') == '1':
+        if os.environ.get('PM64_ANIMATOR_DIAG_M24B') == '1':
+            kit_defs += ' -DPM64_ANIMATOR_DIAG_M24B=1'
+        elif os.environ.get('PM64_BOSS_DIAG_M24') == '1':
             kit_defs += ' -DPM64_BOSS_DIAG_M24=1'
         if region == 'pal':
             # Host-side ROM readers don't see the decomp's VERSION_PAL define.

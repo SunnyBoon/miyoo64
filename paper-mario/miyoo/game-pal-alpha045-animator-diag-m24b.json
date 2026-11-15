@@ -1,0 +1,27 @@
+{
+  "id": "pm64palalpha045animatordiagm24b",
+  "identity": "PAL-0.4.5-ANIMATOR-DIAG-M24B",
+  "title": "Paper Mario PAL Alpha 0.4.5 Animator Diagnostic M2.4-B",
+  "folder": "PaperMarioPALAlpha045AnimatorDiagM24B",
+  "exe": "pm64",
+  "files": [
+    "pm64",
+    "recipes.bin"
+  ],
+  "icon": "icon.png",
+  "readme": "README-PAL-ALPHA-0.4.5-ANIMATOR-DIAG-M24B.txt",
+  "env": "PM64",
+  "data": "data",
+  "trace_dir": "traces",
+  "empty_dirs": [
+    "data",
+    "traces"
+  ],
+  "rom": {
+    "name": "Paper Mario (Europe, PAL)",
+    "sha1": "2111d39265a317414d359e35a7d971c4dfa5f9e1",
+    "size": 67108864
+  },
+  "system": "PAPERMARIOPAL045ANIMDIAGM24B",
+  "minui_tag": "PM64PAL045ANIMDIAGM24B"
+}

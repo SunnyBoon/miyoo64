@@ -18,6 +18,7 @@
 #include "port.h"
 #include "savestate.h"
 #include "boss_diag.h"
+#include "animator_sample.h"
 
 #define PANEL 240
 
@@ -378,7 +379,11 @@ int pm64_diag_stop_request(void) {
 int pm64_qtrace_request(void) { return pm64_diag_request(PM64_DIAG_RAW_COMPAT); }
 int pm64_qtrace_request_profile(unsigned profile) { (void) profile; return pm64_diag_request(PM64_DIAG_RENDER_FOCUS); }
 
-#ifdef PM64_BOSS_DIAG_M24
+#if defined(PM64_ANIMATOR_DIAG_M24B)
+#define DIAG_SESSION_PREFIX "m24b"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045AnimatorDiagM24B"
+#define DIAG_BUILD_NAME "PAL-0.4.5-ANIMATOR-DIAG-M24B"
+#elif defined(PM64_BOSS_DIAG_M24)
 #define DIAG_SESSION_PREFIX "m24a"
 #define DIAG_APP_NAME "PaperMarioPALAlpha045BossDiagM24"
 #define DIAG_BUILD_NAME "PAL-0.4.5-BOSS-DIAG-M24"
@@ -430,6 +435,7 @@ static int diag_begin(uint32_t swap) {
     } else { sDiag.group[0] = 0; snprintf(sDiag.role, sizeof sDiag.role, "manual"); }
     if (sDiag.mode == PM64_DIAG_TIMELINE) {
         boss_diag_arm();
+        animator_profile_arm(sDiag.reload_generation);
         memset(&sProbe, 0, sizeof sProbe);
         memset(&sDiag.event_start, 0, sizeof sDiag.event_start);
         memset(&sDiag.event_end, 0, sizeof sDiag.event_end);
@@ -588,10 +594,26 @@ static void diag_boss_write(void) {
     boss_diag_cancel();
 }
 
+static void diag_animator_write(void) {
+    const struct AnimatorSamples *s = animator_profile_result(); unsigned missing=0;
+    for (unsigned i=1;i<s->count;i++) if (!s->samples[i].marker) missing++;
+    if (sDiag.log) {
+        fprintf(sDiag.log,"M24B status=%s reason=%s count=%u limit=%u ambiguous_updates=%u first_update=unobserved reload=%u\n",(!s->incomplete && s->count==ANIMATOR_SAMPLE_LIMIT && !missing) ? "complete":"incomplete", s->reason ? s->reason : s->count<ANIMATOR_SAMPLE_LIMIT ? "missing_samples" : missing ? "unmatched_update" : "none",s->count,ANIMATOR_SAMPLE_LIMIT,missing,sDiag.reload_generation);
+        for (unsigned i=0;i<s->count;i++) {
+            const struct AnimatorSample *v=&s->samples[i];
+            fprintf(sDiag.log,"M24B sample=%u frame=%u reload=%u update=%u model=%llx animator=%llx animator_id=%d node=%llx animation=%llx read=%llx flags=%u hook_frame=%u hook_calls=%u cause=%u commands=%u timer_changed=%u transforms=%u timer_before=%.9g timer=%.9g speed=%.9g local=%.9g,%.9g,%.9g world=%.9g,%.9g,%.9g head=%.9g,%.9g,%.9g matrix=",i+1,v->frame,v->reload,v->update_id,(unsigned long long)v->model,(unsigned long long)v->animator,v->animator_id,(unsigned long long)v->node,(unsigned long long)v->animation,(unsigned long long)v->read_pos,v->flags,v->hook_frame,v->hook_calls,v->marker,v->commands,v->timer_updated,v->transforms,(double)v->timer_before,(double)v->timer,(double)v->speed,(double)v->local[0],(double)v->local[1],(double)v->local[2],(double)v->world[0],(double)v->world[1],(double)v->world[2],(double)v->head[0],(double)v->head[1],(double)v->head[2]);
+            for (unsigned j=0;j<16;j++) fprintf(sDiag.log,"%s%.9g",j ? ",":"",(double)v->matrix[j]);
+            fputc('\n',sDiag.log);
+        }
+    }
+    animator_profile_stop();
+}
+
 static void diag_end_ex(uint32_t swap, const char *reason, int screenshot) {
     const int ok = screenshot ? diag_screenshot() : 0;
     if (sDiag.mode == PM64_DIAG_TIMELINE) {
         diag_boss_write();
+        diag_animator_write();
         pm64_probe_write();
         sDiag.event_start_pending = 0; /* no later scheduler: scripts stay unknown */
         sDiag.event_end_pending = 1;
@@ -634,7 +656,7 @@ void pm64_diag_state_loaded(void) {
     /* Keep a tiny history across sessions: a following focus capture is linked
      * only to one observed load after one completed baseline, never guessed. */
     sDiag.reload_generation++; sDiag.reload_game = port_frame; sDiag.reload_swap = sDiag.swap_start;
-    if (sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE) boss_diag_fail();
+    if (sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE) { boss_diag_fail(); animator_profile_reload(); }
     if (sDiag.active && sDiag.mode == PM64_DIAG_TIMELINE && sDiag.records < PM64_DIAG_MAX_RECORDS) {
         sDiag.records++;
         port_log("M21 TIMELINE n=%u event=savestate_load generation=%u game=%u\n", sDiag.records, sDiag.reload_generation, (unsigned)port_frame);

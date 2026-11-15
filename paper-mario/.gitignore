@@ -39,6 +39,7 @@
 !tools/port/nearw_test.c
 !tools/port/clock_test.c
 !tools/port/boss_diag_test.c
+!tools/port/animator_sample_test.c
 !tools/assets/*.py
 !tools/assets/recipes_handheld.json
 !miyoo/icon.svg
@@ -80,3 +81,6 @@ build/
 !miyoo/README-PAL-ALPHA-0.4.5-BOSS-DIAG-M24.txt
 !PAL_ALPHA.md
 !.gitattributes
+
+!miyoo/game-pal-alpha045-animator-diag-m24b.json
+!miyoo/README-PAL-ALPHA-0.4.5-ANIMATOR-DIAG-M24B.txt
