@@ -390,7 +390,11 @@ int pm64_diag_stop_request(void) {
 int pm64_qtrace_request(void) { return pm64_diag_request(PM64_DIAG_RAW_COMPAT); }
 int pm64_qtrace_request_profile(unsigned profile) { (void) profile; return pm64_diag_request(PM64_DIAG_RENDER_FOCUS); }
 
-#if defined(PM64_MERLEE_FIX_TEST)
+#if defined(PM64_DEPTH_FIX_M28)
+#define DIAG_SESSION_PREFIX "m28"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045DepthFixM28"
+#define DIAG_BUILD_NAME "PAL-0.4.5-DEPTH-FIX-M28"
+#elif defined(PM64_MERLEE_FIX_TEST)
 #define DIAG_SESSION_PREFIX "merlee-test"
 #define DIAG_APP_NAME "PaperMarioPALMerleeFixTest"
 #define DIAG_BUILD_NAME "PAL-0.4.5-MERLEE-FIX-TEST"

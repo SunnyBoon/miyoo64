@@ -1,0 +1,27 @@
+{
+  "id": "pm64paldepthfixm28",
+  "identity": "PAL-0.4.5-DEPTH-FIX-M28",
+  "title": "Paper Mario PAL Alpha 0.4.5 Depth Fix M2.8",
+  "folder": "PaperMarioPALAlpha045DepthFixM28",
+  "exe": "pm64",
+  "files": [
+    "pm64",
+    "recipes.bin"
+  ],
+  "icon": "icon.png",
+  "readme": "README-PAL-DEPTH-FIX-M28.txt",
+  "env": "PM64",
+  "data": "data",
+  "trace_dir": "traces",
+  "empty_dirs": [
+    "data",
+    "traces"
+  ],
+  "rom": {
+    "name": "Paper Mario (Europe, PAL)",
+    "sha1": "2111d39265a317414d359e35a7d971c4dfa5f9e1",
+    "size": 67108864
+  },
+  "system": "PAPERMARIOPALDEPTHM28",
+  "minui_tag": "PM64PALDEPTHM28"
+}

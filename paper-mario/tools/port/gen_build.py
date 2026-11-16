@@ -1084,7 +1084,9 @@ def generate(plat, region='us'):
                      'port_mixer.c', 'port_audio_out.c', 'port_hh.c', 'port_state.c'}
         kit_inc = f'-I{C_ROOT}/bench/kit -I{C_ROOT}/kit/platform -I{C_DECOMP}/include'
         kit_defs = '-DTARGET_HANDHELD=1 -DPM64=1 -DF3DEX_GBI_2=1 -D_LANGUAGE_C=1 -DPORT_NO_FPS=1 -DNON_MATCHING=1 -DAVOID_UB=1'
-        if os.environ.get('PM64_MERLEE_FIX_TEST') == '1':
+        if os.environ.get('PM64_DEPTH_FIX_M28') == '1':
+            kit_defs += ' -DPM64_DEPTH_FIX_M28=1'
+        elif os.environ.get('PM64_MERLEE_FIX_TEST') == '1':
             kit_defs += ' -DPM64_MERLEE_FIX_TEST=1'
         elif os.environ.get('PM64_VINE_FIX_M26') == '1':
             kit_defs += ' -DPM64_VINE_FIX_M26=1'
