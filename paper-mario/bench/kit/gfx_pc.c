@@ -303,6 +303,7 @@ static struct RenderingState {
     bool decal_mode;
     bool alpha_blend;
     bool edge_opaque; // TEX_EDGE without FORCE_BL: the soft backend writes it unblended (X12)
+    bool edge_full_coverage;
     bool own_edges;   // PM64_FILLRULE: blended / alpha-tested without AA_EN, each pixel to one triangle of an edge
     bool tex_add; // backend texture function is ADD (texel + vertex colour)
 } rendering_state __attribute__((aligned(16)));
@@ -2970,6 +2971,20 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
 #endif
     bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;
     bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
+#if defined(PM64) && !defined(TARGET_PSP)
+    /* One-cycle AA ZB texture edge, alpha compare disabled: approximate the
+     * RDP coverage rejection for a fully covered pixel, not its edge/VI blend. */
+    {
+        extern void gfx_soft_set_edge_full_coverage(bool on);
+        const bool full = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_1CYCLE &&
+            rdp.other_mode_l == (G_RM_AA_ZB_TEX_EDGE | G_RM_AA_ZB_TEX_EDGE2);
+        if (full != rendering_state.edge_full_coverage) {
+            gfx_flush();
+            gfx_soft_set_edge_full_coverage(full);
+            rendering_state.edge_full_coverage = full;
+        }
+    }
+#endif
     bool use_noise = (rdp.other_mode_l & G_AC_DITHER) == G_AC_DITHER;
     if (texture_edge) {
         use_alpha = true;

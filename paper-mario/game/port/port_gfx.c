@@ -305,6 +305,15 @@ static struct {
 } sDiag SAVESTATE_EXCLUDE;
 int pm64_diag_event_pending SAVESTATE_EXCLUDE;
 static struct { unsigned count; struct PM64ProbeRow rows[PM64_PROBE_LIMIT]; } sProbe SAVESTATE_EXCLUDE;
+static struct { unsigned count, dropped; struct { unsigned frame, reload, pos; int entity; float yaw2, yaw3; } row[8]; } sHeartYaw SAVESTATE_EXCLUDE;
+void port_heart_yaw_sample(int entity, unsigned pos, float yaw2, float yaw3) {
+    if (!sDiag.armed || sDiag.mode != PM64_DIAG_RENDER_FOCUS) return;
+    if (sHeartYaw.count == 8) { sHeartYaw.dropped++; return; }
+    unsigned i = sHeartYaw.count++;
+    sHeartYaw.row[i].frame = port_frame; sHeartYaw.row[i].reload = sDiag.reload_generation;
+    sHeartYaw.row[i].entity = entity; sHeartYaw.row[i].pos = pos;
+    sHeartYaw.row[i].yaw2 = yaw2; sHeartYaw.row[i].yaw3 = yaw3;
+}
 /* Merlee fix candidate: bounded observations, written only at TIMELINE end. */
 static struct { unsigned count, dropped, next; struct { unsigned frame; int state, card, phase, alpha, width, height, x, y, result; } row[64]; } sMerlee SAVESTATE_EXCLUDE;
 void port_merlee_sample(int state, int card, int phase, int alpha, int width, int height, int x, int y, int result) {
@@ -372,6 +381,7 @@ int pm64_diag_request(unsigned mode) {
         sDiag.state = PM64_DIAG_BUSY; snprintf(sDiag.reason, sizeof sDiag.reason, "capture_active"); return 0;
     }
     sDiag.mode = mode;
+    memset(&sHeartYaw, 0, sizeof sHeartYaw);
     sDiag.armed = 1;
     sDiag.stop_requested = 0;
     sDiag.state = PM64_DIAG_ARMED;
@@ -390,7 +400,19 @@ int pm64_diag_stop_request(void) {
 int pm64_qtrace_request(void) { return pm64_diag_request(PM64_DIAG_RAW_COMPAT); }
 int pm64_qtrace_request_profile(unsigned profile) { (void) profile; return pm64_diag_request(PM64_DIAG_RENDER_FOCUS); }
 
-#if defined(PM64_DEPTH_FIX_M28)
+#if defined(PM64_HEART_YAW_RESET_M31)
+#define DIAG_SESSION_PREFIX "m31"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045HeartYawResetM31"
+#define DIAG_BUILD_NAME "PAL-0.4.5-HEART-YAW-RESET-M31"
+#elif defined(PM64_HEART_YAW_M30)
+#define DIAG_SESSION_PREFIX "m30"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045HeartYawDiagM30"
+#define DIAG_BUILD_NAME "PAL-0.4.5-HEART-YAW-DIAG-M30"
+#elif defined(PM64_HEART_FIX_M29)
+#define DIAG_SESSION_PREFIX "m29"
+#define DIAG_APP_NAME "PaperMarioPALAlpha045HeartFixM29"
+#define DIAG_BUILD_NAME "PAL-0.4.5-HEART-FIX-M29"
+#elif defined(PM64_DEPTH_FIX_M28)
 #define DIAG_SESSION_PREFIX "m28"
 #define DIAG_APP_NAME "PaperMarioPALAlpha045DepthFixM28"
 #define DIAG_BUILD_NAME "PAL-0.4.5-DEPTH-FIX-M28"
@@ -639,6 +661,11 @@ static void diag_animator_write(void) {
 
 static void diag_end_ex(uint32_t swap, const char *reason, int screenshot) {
     const int ok = screenshot ? diag_screenshot() : 0;
+    if (sDiag.mode == PM64_DIAG_RENDER_FOCUS && sDiag.log) {
+        fprintf(sDiag.log, "M31 YAW status=%s count=%u dropped=%u task_link=unverified\n", sHeartYaw.count == 1 && !sHeartYaw.dropped ? "sampled" : "incomplete", sHeartYaw.count, sHeartYaw.dropped);
+        for (unsigned i = 0; i < sHeartYaw.count; i++)
+            fprintf(sDiag.log, "M31 YAW entity=%d game=%u reload=%u pos=%u yaw2=%.9g yaw3=%.9g\n", sHeartYaw.row[i].entity, sHeartYaw.row[i].frame, sHeartYaw.row[i].reload, sHeartYaw.row[i].pos, (double)sHeartYaw.row[i].yaw2, (double)sHeartYaw.row[i].yaw3);
+    }
     if (sDiag.mode == PM64_DIAG_TIMELINE) {
         if (sDiag.log) {
             fprintf(sDiag.log, "MERLEE variant=fix count=%u dropped=%u limit=64\n", sMerlee.count, sMerlee.dropped);

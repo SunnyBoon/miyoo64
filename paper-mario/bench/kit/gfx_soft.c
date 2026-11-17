@@ -45,6 +45,7 @@ static int sW SAVESTATE_EXCLUDE, sH SAVESTATE_EXCLUDE;
 static uint32_t *sNatFB SAVESTATE_EXCLUDE; /* native target (defined with the frame section) */
 #ifdef PM64
 static bool sEdgeOpaque SAVESTATE_EXCLUDE; /* gfx_soft_set_edge_opaque (X12) */
+static bool sEdgeFullCoverage SAVESTATE_EXCLUDE;
 static bool sOwnTri SAVESTATE_EXCLUDE;     /* gfx_soft_set_own_edges (PM64_FILLRULE) */
 static bool sHudExact SAVESTATE_EXCLUDE, sHudExactRun SAVESTATE_EXCLUDE; /* raster_tri's pixel-exact 2D (X27) */
 static bool sRtActive SAVESTATE_EXCLUDE; /* render-to-texture target, see gfx_soft_rt_begin */
@@ -1771,7 +1772,13 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
         }
     }
     if (sHudExactRun) use_bilin = false;
-    const int amin = tex_edge ? 0x55 : 8; /* alpha reject: texture-edge or near-zero (only under sUseAlpha) */
+    /* For full geometric coverage, ((alpha * 8 + 4) >> 3) >> 5 is nonzero
+     * from 32. This deliberately does not estimate subpixel coverage. */
+#ifdef PM64
+    const int amin = tex_edge ? (sEdgeFullCoverage ? 32 : 0x55) : 8;
+#else
+    const int amin = tex_edge ? 0x55 : 8;
+#endif
     const bool rgb_tex = tex && sCurShader && sCurShader->rgb_tex, rgb_in = !sCurShader || sCurShader->rgb_in;
     const bool a_tex = tex && sCurShader && sCurShader->a_tex, a_in = !sCurShader || sCurShader->a_in;
     const bool rgb_texa = sCurShader && sCurShader->rgb_texa, rgb_decal = sCurShader && sCurShader->rgb_decal;
@@ -3013,6 +3020,7 @@ void gfx_scegu_set_cull_mode(uint32_t cull) { (void)cull; /* GE-only API; windin
 void gfx_scegu_set_texfunc_add(bool on) { sTexAdd = on; }
 /* a texture edge without FORCE_BL (gfx_pc, X12): the RDP writes such a pixel as the texel's own colour or not at all */
 void gfx_soft_set_edge_opaque(bool on) { sEdgeOpaque = on; }
+void gfx_soft_set_edge_full_coverage(bool on) { sEdgeFullCoverage = on; }
 /* PM64_FILLRULE: gfx_pc says when the draw is blended or alpha-tested without AA_EN (see own_edge) */
 void gfx_soft_set_own_edges(bool on) { sOwnTri = on; }
 void gfx_scegu_reset_texfunc_add(void) { sTexAdd = false; }

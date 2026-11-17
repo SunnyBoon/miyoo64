@@ -1,0 +1,27 @@
+{
+  "id": "pm64palheartyawresetm31",
+  "identity": "PAL-0.4.5-HEART-YAW-RESET-M31",
+  "title": "Paper Mario PAL Heart Yaw Reset A/B M3.1",
+  "folder": "PaperMarioPALAlpha045HeartYawResetM31",
+  "exe": "pm64",
+  "files": [
+    "pm64",
+    "recipes.bin"
+  ],
+  "icon": "icon.png",
+  "readme": "README-PAL-HEART-YAW-RESET-M31.txt",
+  "env": "PM64",
+  "data": "data",
+  "trace_dir": "traces",
+  "empty_dirs": [
+    "data",
+    "traces"
+  ],
+  "rom": {
+    "name": "Paper Mario (Europe, PAL)",
+    "sha1": "2111d39265a317414d359e35a7d971c4dfa5f9e1",
+    "size": 67108864
+  },
+  "system": "PAPERMARIOPALYAWRESETM31",
+  "minui_tag": "PM64PALYAWRESETM31"
+}

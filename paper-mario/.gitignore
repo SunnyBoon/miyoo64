@@ -94,3 +94,12 @@ build/
 !miyoo/game-pal-depth-fix-m28.json
 !miyoo/README-PAL-DEPTH-FIX-M28.txt
 !tools/port/DEPTH-FIX-M28.md
+!miyoo/game-pal-heart-fix-m29.json
+!miyoo/README-PAL-HEART-FIX-M29.txt
+!tools/port/HEART-FIX-M29.md
+!miyoo/game-pal-heart-yaw-m30.json
+!miyoo/README-PAL-HEART-YAW-M30.txt
+!miyoo/game-pal-heart-yaw-reset-m31.json
+!miyoo/README-PAL-HEART-YAW-RESET-M31.txt
+
+!tools/port/HEART-YAW-RESET-M31.md
