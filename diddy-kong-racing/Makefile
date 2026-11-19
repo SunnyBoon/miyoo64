@@ -4,7 +4,7 @@
 #   make PLAT=miyoo   -j$(nproc)   # Miyoo Mini cross build (SDL 1.2, glibc, 320x240 doubled)
 #
 # Game code: decomp/ (DavidSM64/Diddy-Kong-Racing, CC0, see decomp/UPSTREAM),
-# compiled NON_MATCHING for us.v80 with the port's edits under #ifdef PORT.
+# compiled NON_MATCHING for us.v80 (default) or pal.v80 with the port's edits.
 # Platform: port/ (libultra shim, F3DDKR display-list front end, software
 # rasterizer, SDL backends -- the MK64 port's platform kit, adapted).
 #
@@ -14,17 +14,23 @@
 # closed forms (tools/gen_trig_tables.py), not copied from the ROM.
 
 PLAT     ?= pc
-VERSION  := us_v80
-BUILD    := build/$(PLAT)$(if $(filter 1,$(UBSAN)),-ubsan)$(if $(SAN),-san)
-ELF      := $(BUILD)/dkr
-PYTHON   ?= python3
-
-# Asset ROM offsets (us.v80): the LUT and the start of the asset data. The PI
-# shim serves these offsets from dkr_assets.bin, extracted from the player's ROM.
+VERSION  ?= us_v80
+ifeq ($(VERSION),us_v80)
 ASSETS_LUT_START := 0xED0E0
 ASSETS_LUT_END   := 0xED1B0
 ASSETS_END       := 0xB8CFD0
+else ifeq ($(VERSION),pal_v80)
+ASSETS_LUT_START := 0xED170
+ASSETS_LUT_END   := 0xED240
+ASSETS_END       := 0xB8D060
+else
+$(error Unsupported VERSION $(VERSION); choose us_v80 or pal_v80)
+endif
+BUILD    := build/$(PLAT)$(if $(filter pal_v80,$(VERSION)),-pal-v80)$(if $(filter 1,$(UBSAN)),-ubsan)$(if $(SAN),-san)
+ELF      := $(BUILD)/dkr
+PYTHON   ?= python3
 
+# The PI shim serves the selected ROM asset region from its cache.
 V := @
 ifeq ($(VERBOSE),1)
   V :=

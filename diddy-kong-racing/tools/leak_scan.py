@@ -100,10 +100,14 @@ def inflated_assets(rom):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--rom', required=True)
+    ap.add_argument('--version', choices=('us_v80', 'pal_v80'), default='us_v80')
     ap.add_argument('--enums', default='decomp/include/asset_enums.h')
     ap.add_argument('--code-budget-kb', type=int, default=48)
     ap.add_argument('files', nargs='+')
     a = ap.parse_args()
+    global LUT_START, ASSETS_END
+    if a.version == 'pal_v80':
+        LUT_START, ASSETS_END = 0xED170, 0xB8D060
     rom = open(a.rom, 'rb').read()
     assets = {}
     region = rom[LUT_START:ASSETS_END]
