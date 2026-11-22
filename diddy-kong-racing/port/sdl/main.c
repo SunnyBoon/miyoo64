@@ -1018,7 +1018,9 @@ static void pal_data_dir(const char *argv0) {
         snprintf(base, sizeof(base), "./data");
     }
     mkdir(base, 0777);
-#if defined(DKR_PAL264)
+#if defined(DKR_M07B)
+    if (snprintf(dir, sizeof(dir), "%s/pal-v80-m07b", base) >= (int) sizeof(dir)) exit(1);
+#elif defined(DKR_PAL264)
     if (snprintf(dir, sizeof(dir), "%s/pal-v80-m07a", base) >= (int) sizeof(dir)) exit(1);
 #else
     if (snprintf(dir, sizeof(dir), "%s/pal-v80", base) >= (int) sizeof(dir)) exit(1);
