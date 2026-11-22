@@ -2782,7 +2782,7 @@ static int pm_genshade_on(void) {
 /* Import + bind the textures the generic combine reads and hand the backend its state. */
 /* The generic draw's TEXEL1 follows TEXEL0's S/T: (s + a) * 2^k + c (gen_t1). pm_gen_setup notes k and whether
  * both texels are read, for the per-triangle UV drop (gfx_emit_triangle, pm_uv_step). */
-static int pm_t1_k[2], pm_t1_linked;
+static int pm_t1_k[2], pm_t1_linked, pm_t1_only;
 extern void gfx_itemtrace_state(uint32_t omh, uint32_t oml, int edge, int ztest, int zupdate, int amin,
                                 const uint8_t *prim, const uint8_t *env);
 extern int gfx_itemtrace_active(void);
@@ -2817,6 +2817,7 @@ static void pm_itemtrace_bind_t1(int t1i) {
 }
 static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
     pm_t1_linked = t0 && t1;
+    pm_t1_only = !t0 && t1;
     pm_t1_k[0] = pm_t1_k[1] = 0;
     for (int pass = 0; pass < 2; pass++) { /* a reset under tile 1's import: tile 0 again (gfx_cache_epoch) */
     const uint32_t epoch = gfx_cache_epoch;
@@ -3435,7 +3436,7 @@ static void gfx_emit_triangle(const struct LoadedVertex *a, const struct LoadedV
             float offu = (rdp.texture_tile.cms & G_TX_CLAMP) ? 0.0f : ((rdp.texture_tile.cms & G_TX_MIRROR) && !(tri_state.mirror & 1)) ? 2.0f * port_floorf(minu * 0.5f) : port_floorf(minu);
             float offv = (rdp.texture_tile.cmt & G_TX_CLAMP) ? 0.0f : ((rdp.texture_tile.cmt & G_TX_MIRROR) && !(tri_state.mirror & 2)) ? 2.0f * port_floorf(minv * 0.5f) : port_floorf(minv);
 #ifdef PM64
-            if (!pm_uvdrop_on()) offu = offv = 0.0f; /* PM64_UVDROP=0: no drop at all, the exact reference */
+            if (!pm_uvdrop_on() || (pm_gen_active && pm_t1_only)) offu = offv = 0.0f; /* TEXEL1-only uses its own sampler and coordinate frame. */
             else if (pm_gen_active && pm_t1_linked && (offu != 0.0f || offv != 0.0f) && pm_uvrebase_on()) {
                 /* Dropping n repeats of TEXEL0 moves TEXEL1 by n * W0 * 2^k texels: whole repeats of TEXEL1 only when
                  * that is a multiple of its period P1. So drop in steps of the smallest power of two L that makes
