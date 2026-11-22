@@ -921,6 +921,13 @@ static void gfx_flush(void) {
     }
 }
 
+#ifdef PM64
+static bool pm_m41_edge_ab(bool enabled, uint32_t omh, uint32_t oml) {
+    return enabled && (omh & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_1CYCLE &&
+        oml == (G_RM_AA_ZB_TEX_EDGE | G_RM_AA_ZB_TEX_EDGE2);
+}
+#endif
+
 static struct ShaderProgram *gfx_lookup_or_create_shader_program(uint32_t shader_id) {
     struct ShaderProgram *prg = gfx_rapi->lookup_shader(shader_id);
     if (prg == NULL) {
@@ -3028,7 +3035,15 @@ static void gfx_tri_rebuild_state(struct LoadedVertex *v1) {
         static int sEdgeOp = -1;
         extern void gfx_soft_set_edge_opaque(bool on);
         if (sEdgeOp < 0) { const char *e = getenv("PM64_EDGEOPAQUE"); sEdgeOp = e != NULL && e[0] == '1'; }
-        const bool eo = sEdgeOp && texture_edge && !(rdp.other_mode_l & FORCE_BL);
+        bool eo = sEdgeOp && texture_edge && !(rdp.other_mode_l & FORCE_BL);
+#ifdef PM64
+        /* M4.1 A/B: only the observed one-cycle AA/ZB texture-edge state.
+         * Retain the existing alpha/depth tests; write passing texels without
+         * the approximate framebuffer blend. Disabled unless explicitly set. */
+        static int sEdgeAB = -1;
+        if (sEdgeAB < 0) { const char *e = getenv("PM64_EDGE_AB"); sEdgeAB = e && e[0] == '1' && e[1] == '\0'; }
+        if (pm_m41_edge_ab(sEdgeAB, rdp.other_mode_h, rdp.other_mode_l)) eo = true;
+#endif
         if (eo != rendering_state.edge_opaque) {
             gfx_flush();
             gfx_soft_set_edge_opaque(eo);
