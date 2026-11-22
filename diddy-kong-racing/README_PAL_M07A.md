@@ -1,3 +1,5 @@
+> Historical M0.7a test notes. For the hardware-tested PAL alpha and its exact install path, see [README_PAL_V80.md](README_PAL_V80.md).
+
 # PAL M0.7a isolated display test
 
 This is an experimental Miyoo-only build, not a release. `PAL264=1` uses a
