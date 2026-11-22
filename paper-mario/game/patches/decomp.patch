@@ -1972,6 +1972,131 @@ index 072e36068..991b88269 100644
      osEPiReadIo(nuPiCartHandle, (u32) &gISVDbgPrnAdrs->magic, &data);
      if (data != ASCII_TO_U32('I', 'S', '6', '4')) {
          return (char*) 1;
+diff --git a/src/item_entity.c b/src/item_entity.c
+index 0eaeed1d5..04606ca9a 100644
+--- a/src/item_entity.c
++++ b/src/item_entity.c
+@@ -905,6 +905,59 @@ void update_item_entities(void) {
+     }
+ }
+ 
++#ifdef PM64_PORT
++/* The queued RenderTask owns this record; records are reused only when the
++ * task slot itself is reused, not when another item is queued. */
++extern int pm64_star_diag_enabled(void);
++extern unsigned int port_frame;
++extern void port_log(const char*, ...);
++typedef struct StarDiagTask {
++    RenderTask* task;
++    ItemEntity* item;
++    unsigned int id, frame;
++    int slot;
++} StarDiagTask;
++static StarDiagTask sStarTasks[1024];
++static StarDiagTask* sStarDrawing;
++static unsigned int sStarSerial;
++static void star_diag_state(ItemEntity* item, int slot, unsigned int task, int queued) {
++    /* STAR_PIECE has four SetImage commands of six words each. readPos
++     * points just past the active command; before the first update it is 0. */
++    u32 offset = (u32)item->readPos - (u32)gItemEntityScripts[item->itemID];
++    int step = (offset >= 24 && offset <= 96 && offset % 24 == 0) ? (int)(offset / 24) - 1 : -1;
++    int anim = step == 3 ? 1 : step;
++    port_log("PM-PAL-GFX-003 item frame=%u task=%u slot=%d queued=%d flags=%08x pos=%.3f,%.3f,%.3f anim_index=%d anim_step=%d anim_next_offset=%u anim_wait=%u raster=%u palette=%u\n",
++             port_frame, task, slot, queued, (unsigned)item->flags, item->pos.x, item->pos.y, item->pos.z,
++             anim, step, offset, item->nextUpdate, item->lookupRasterIndex, item->lookupPaletteIndex);
++}
++static void star_diag_append(void* arg) {
++    StarDiagTask* rec = arg;
++    StarDiagTask* previous = sStarDrawing;
++    sStarDrawing = rec;
++    star_diag_state(rec->item, rec->slot, rec->id, 1);
++    port_log("PM-PAL-GFX-003 append frame=%u task=%u queued_frame=%u slot=%d dl=%p\n",
++             port_frame, rec->id, rec->frame, rec->slot, gMainGfxPos);
++    appendGfx_item_entity(rec->item);
++    sStarDrawing = previous;
++}
++static void star_diag_queue(RenderTask* task, ItemEntity* item, int slot) {
++    StarDiagTask* rec = 0;
++    int i;
++    for (i = 0; i < 1024; i++) if (sStarTasks[i].task == task) { rec = &sStarTasks[i]; break; }
++    if (!rec) for (i = 0; i < 1024; i++) if (!sStarTasks[i].task) { rec = &sStarTasks[i]; break; }
++    if (!rec || sStarSerial >= 0x00ffffffu) {
++        star_diag_state(item, slot, 0, 1);
++        port_log("PM-PAL-GFX-003 untracked frame=%u task=0 slot=%d reason=capacity\n", port_frame, slot);
++        return;
++    }
++    rec->task = task; rec->item = item; rec->slot = slot;
++    rec->frame = port_frame; rec->id = ++sStarSerial;
++    task->appendGfx = star_diag_append; task->appendGfxArg = rec;
++    star_diag_state(item, slot, rec->id, 1);
++    port_log("PM-PAL-GFX-003 queued frame=%u task=%u slot=%d task_ptr=%p\n", port_frame, rec->id, slot, task);
++}
++#endif
++
+ void appendGfx_item_entity(void* data) {
+     ItemEntity* item = (ItemEntity*)data;
+     Mtx mtxTransform;
+@@ -1008,7 +1061,17 @@ void appendGfx_item_entity(void* data) {
+                        G_TX_NOMIRROR | G_TX_CLAMP, 8, G_TX_NOLOD, G_TX_NOMIRROR | G_TX_CLAMP, 8, G_TX_NOLOD);
+             gDPSetTileSize(gMainGfxPos++, G_TX_RENDERTILE, 0x0400, 0x0400, 0x045C, 0x045C);
+         }
++#ifdef PM64_PORT
++        if (sStarDrawing && sStarDrawing->item == item) {
++            gDPNoOpTag(gMainGfxPos++, 0xA3000000u | sStarDrawing->id);
++        }
++#endif
+         gSPDisplayList(gMainGfxPos++, D_8014C678);
++#ifdef PM64_PORT
++        if (sStarDrawing && sStarDrawing->item == item) {
++            gDPNoOpTag(gMainGfxPos++, 0xA4000000u | sStarDrawing->id);
++        }
++#endif
+     } else {
+         gDPLoadTLUT_pal16(gMainGfxPos++, 0, gHudElementCacheTablePalette[item->lookupPaletteIndex].data);
+         if (gSpriteShadingProfile->flags != 0) {
+@@ -1042,7 +1105,17 @@ void appendGfx_item_entity(void* data) {
+                        G_TX_NOMIRROR | G_TX_CLAMP, 8, G_TX_NOLOD, G_TX_NOMIRROR | G_TX_CLAMP, 8, G_TX_NOLOD);
+             gDPSetTileSize(gMainGfxPos++, G_TX_RENDERTILE, 0x0400, 0x0400, 0x047C, 0x047C);
+         }
++#ifdef PM64_PORT
++        if (sStarDrawing && sStarDrawing->item == item) {
++            gDPNoOpTag(gMainGfxPos++, 0xA3000000u | sStarDrawing->id);
++        }
++#endif
+         gSPDisplayList(gMainGfxPos++, D_8014C6A0);
++#ifdef PM64_PORT
++        if (sStarDrawing && sStarDrawing->item == item) {
++            gDPNoOpTag(gMainGfxPos++, 0xA4000000u | sStarDrawing->id);
++        }
++#endif
+     }
+     gSPPopMatrix(gMainGfxPos++, G_MTX_MODELVIEW);
+     gDPPipeSync(gMainGfxPos++);
+@@ -1061,6 +1134,14 @@ void draw_item_entities(void) {
+     for (i = 0; i < MAX_ITEM_ENTITIES; i++) {
+         ItemEntity* item = gCurrentItemEntities[i];
+ 
++#ifdef PM64_PORT
++        if (item != nullptr && item->itemID == ITEM_STAR_PIECE && pm64_star_diag_enabled()) {
++            int queued = item->flags != 0 && !(item->flags & ITEM_ENTITY_FLAG_HIDDEN)
++                && (item->flags & (1 << gCurrentCamID)) && !(item->flags & ITEM_ENTITY_FLAG_INVISIBLE)
++                && (item->renderGroup == -1 || ItemEntityRenderGroup == item->renderGroup);
++            if (!queued) star_diag_state(item, i, 0, 0);
++        }
++#endif
+         if (item != nullptr
+             && item->flags != 0
+             && !(item->flags & ITEM_ENTITY_FLAG_HIDDEN)
+@@ -1079,6 +1160,9 @@ void draw_item_entities(void) {
+             rtPtr->dist = 0;
+ 
+             retTask = queue_render_task(rtPtr);
++#ifdef PM64_PORT
++            if (item->itemID == ITEM_STAR_PIECE && pm64_star_diag_enabled()) star_diag_queue(retTask, item, i);
++#endif
+             retTask->renderMode |= RENDER_TASK_FLAG_REFLECT_FLOOR;
+         }
+ 
 diff --git a/src/model.c b/src/model.c
 index a68a06b44..5f05fff6b 100644
 --- a/src/model.c

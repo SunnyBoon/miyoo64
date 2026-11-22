@@ -103,3 +103,8 @@ build/
 !miyoo/README-PAL-HEART-YAW-RESET-M31.txt
 
 !tools/port/HEART-YAW-RESET-M31.md
+
+!tools/port/star_diag_dl_test.c
+!tools/port/star_diag_raster_test.c
+
+!tools/port/STAR-DIAG.md

@@ -72,6 +72,25 @@ extern int gDebugKartTexCount;
 extern uint16_t gDebugTex32[32 * 32];
 extern int gDebugTex32Valid;
 extern void port_log(const char* fmt, ...);
+#ifdef PM64
+/* Marker payloads are emitted only around the star body display list. */
+static struct { unsigned id, interpreted, early, cull_clip, emitted, binding_logged; } sStarDiag SAVESTATE_EXCLUDE;
+extern uint32_t port_frame;
+extern void gfx_star_diag_begin(int probe);
+extern int pm64_diag_render_focus_active(void);
+extern void gfx_star_diag_end(unsigned id, unsigned frame);
+int pm64_star_diag_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) { const char* e = getenv("PM64_STAR_DIAG"); enabled = e && e[0] == '1' && e[1] == 0; }
+    return enabled;
+}
+#define STAR_EARLY() do { if (sStarDiag.id) sStarDiag.early++; } while (0)
+#define STAR_CULL() do { if (sStarDiag.id) sStarDiag.cull_clip++; } while (0)
+#else
+#define STAR_EARLY() ((void)0)
+#define STAR_CULL() ((void)0)
+#endif
+
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
@@ -866,6 +885,14 @@ static void gfx_flush(void) {
             sceGuDisable(GU_ALPHA_TEST);
             port_log("  flush %u colour %02X%02X%02X tris %u tex %d cc %08X\n", (unsigned) idx, col.r, col.g, col.b, (unsigned) buf_vbo_num_tris,
                      rendering_state.textures[0] ? (int) rendering_state.textures[0]->texture_id : -1, (unsigned) tri_state.cc_id);
+        }
+#endif
+#ifdef PM64
+        if (sStarDiag.id && !sStarDiag.binding_logged && pm64_diag_render_focus_active()) {
+            const struct TextureHashmapNode *a = rendering_state.textures[0], *b = rendering_state.textures[1];
+            port_log("PM-PAL-GFX-003 alpha_bound frame=%u task=%u tex0_valid=%d tex0_id=%u tex0_hash=%08X tex1_valid=%d tex1_id=%u tex1_hash=%08X hash_scope=cache_key_not_raw_palette\n",
+                port_frame,sStarDiag.id,a!=NULL,a?a->texture_id:0,a?a->content_hash:0,b!=NULL,b?b->texture_id:0,b?b->content_hash:0);
+            sStarDiag.binding_logged = 1;
         }
 #endif
         gfx_flush_index++;
@@ -3463,6 +3490,9 @@ static void gfx_emit_triangle(const struct LoadedVertex *a, const struct LoadedV
         }
     }
 #endif
+#ifdef PM64
+    if (sStarDiag.id) sStarDiag.emitted++;
+#endif
     buf_vbo_num_tris++;
 }
 
@@ -3602,12 +3632,15 @@ static bool pm_keeps_mem(void) {
 }
 #endif
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
+#ifdef PM64
+    if (sStarDiag.id) sStarDiag.interpreted++;
+#endif
     /* A tri command's index (index * 2 in a byte) reaches 127; the vertex buffer holds MAX_VERTICES. The RSP would
      * read whatever DMEM follows its buffer: here the triangle is dropped rather than read past loaded_vertices. */
-    if (vtx1_idx >= MAX_VERTICES || vtx2_idx >= MAX_VERTICES || vtx3_idx >= MAX_VERTICES) return;
+    if (vtx1_idx >= MAX_VERTICES || vtx2_idx >= MAX_VERTICES || vtx3_idx >= MAX_VERTICES) { STAR_EARLY(); return; }
 #ifdef PM64
     if (pm64_zimg_pending) pm64_zimg_begin(); /* the first triangle into the depth image begins its target */
-    if (pm_keeps_mem()) return;
+    if (pm_keeps_mem()) { STAR_EARLY(); return; }
 #endif
 #ifdef PORT_EXP_NOTRI
     return;
@@ -3625,7 +3658,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         // after the phase bookkeeping). GB_OUT is one bit for all four sides, so three vertices
         // sharing it may be on opposite sides of the screen: never a reject. Without near clipping
         // (PM64_NEARCLIP=0) a triangle wholly in front of the near plane still draws.
-        return;
+        STAR_EARLY(); return;
     }
 #ifdef PM64
     if (gfx_trace_frames > 0) { /* PM64_TRACE=N PM64_TRILOG=1: every triangle with its state (round 16, the fountain hunt) */
@@ -3685,7 +3718,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
      * would rasterize no pixel, since raster_tri clamps to the viewport, so skip the emit, state
      * rebuild and setup. After the phase bookkeeping, so target selection is unchanged. */
     if (v1->clip_rej & v2->clip_rej & v3->clip_rej & XY_OUT) {
-        return;
+        STAR_EARLY(); return;
     }
 #endif
     /* Software-path far cull (device round 12; the PSP-GE PORT_DRAW_DIST block
@@ -3694,7 +3727,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
      * distance). OFF by default (1e30): on DK Jungle it only bought ~17% and
      * the user rejected the pop-in; kept as a desktop tuning knob. */
     if (rsp.is_persp && v1->_w > gfx_draw_dist_w && v2->_w > gfx_draw_dist_w && v3->_w > gfx_draw_dist_w) {
-        return;
+        STAR_EARLY(); return;
     }
 
 
@@ -3713,14 +3746,14 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         switch (rsp.geometry_mode & G_CULL_BOTH) {
             case G_CULL_FRONT:
                 if (cross <= 0) {
-                    return; }
+                    STAR_CULL(); return; }
                 break;
             case G_CULL_BACK:
                 if (cross >= 0) {
-                    return; }
+                    STAR_CULL(); return; }
                 break;
             case G_CULL_BOTH:
-                return;
+                STAR_CULL(); return;
         }
         culled_early = true;
     }
@@ -3780,7 +3813,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
 
         if(!clipped_vertices_num){
             /* No idea if this is possible */
-            return;
+            STAR_CULL(); return;
         }
         size_t i;
         for(i = 0;i < clipped_vertices_num;i++){
@@ -3846,13 +3879,13 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         }
         switch (rsp.geometry_mode & G_CULL_BOTH) {
             case G_CULL_FRONT:
-                if (cross <= 0) return;
+                if (cross <= 0) { STAR_CULL(); return; }
                 break;
             case G_CULL_BACK:
-                if (cross >= 0) return;
+                if (cross >= 0) { STAR_CULL(); return; }
                 break;
             case G_CULL_BOTH:
-                return;
+                STAR_CULL(); return;
         }
     }
 #endif
@@ -5338,6 +5371,35 @@ static void gfx_run_dl(Gfx* cmd) {
 #endif
         switch (opcode) {
             case G_NOOP:
+#ifdef PM64
+                if (pm64_star_diag_enabled() && ((cmd->words.w1 >> 24) == 0xA3u || (cmd->words.w1 >> 24) == 0xA4u)) {
+                    unsigned id = cmd->words.w1 & 0x00ffffffu;
+                    gfx_flush(); /* batches cannot cross the identity boundary */
+                    if ((cmd->words.w1 >> 24) == 0xA3u) {
+                        if (sStarDiag.id) port_log("PM-PAL-GFX-003 error frame=%u task=%u reason=nested_marker\n", port_frame, sStarDiag.id);
+                        memset(&sStarDiag, 0, sizeof sStarDiag); sStarDiag.id = id;
+                        int probe = pm64_diag_render_focus_active();
+                        gfx_star_diag_begin(probe);
+                        if (probe) {
+                            int t0 = pm_prim_tile, t1 = (t0 + 1) & 7;
+                            int slot0 = gfx_tex_slot(0), slot1 = pm_ltslots_on() ? gfx_lt_find(pm_tiles[t1].tmem, false) : pm_tex1_slot;
+                            const uint8_t *pal0 = pm_tlut[pm_tiles[t0].palette & 15], *pal1 = pm_tlut[pm_tiles[t1].palette & 15];
+                            port_log("PM-PAL-GFX-003 alpha_binding frame=%u task=%u combine=%06X/%08X other=%08X/%08X prim_a=%u env_a=%u tile0=%d:%u:%u:%u:%u slot0=%d:%d:%p:%u tlut0=%p tile1=%d:%u:%u:%u:%u slot1=%d:%d:%p:%u tlut1=%p\n",
+                                port_frame,id,rdp.pm_cc_w0,rdp.pm_cc_w1,rdp.other_mode_h,rdp.other_mode_l,rdp.prim_color.a,rdp.env_color.a,
+                                t0,pm_tiles[t0].fmt,pm_tiles[t0].siz,pm_tiles[t0].tmem,pm_tiles[t0].palette,slot0,rdp.loaded_texture[slot0].valid,rdp.loaded_texture[slot0].addr,rdp.loaded_texture[slot0].size_bytes,pal0,
+                                t1,pm_tiles[t1].fmt,pm_tiles[t1].siz,pm_tiles[t1].tmem,pm_tiles[t1].palette,slot1,rdp.loaded_texture[slot1].valid,rdp.loaded_texture[slot1].addr,rdp.loaded_texture[slot1].size_bytes,pal1);
+                        }
+                        port_log("PM-PAL-GFX-003 draw_begin frame=%u task=%u dl=%p\n", port_frame, id, cmd);
+                    } else if (sStarDiag.id == id && id) {
+                        port_log("PM-PAL-GFX-003 triangles frame=%u task=%u interpreted=%u early=%u cull_clip=%u emitted=%u dl_end=%p\n",
+                                 port_frame, id, sStarDiag.interpreted, sStarDiag.early, sStarDiag.cull_clip, sStarDiag.emitted, cmd);
+                        gfx_star_diag_end(id, port_frame); sStarDiag.id = 0;
+                    } else {
+                        port_log("PM-PAL-GFX-003 error frame=%u task=%u reason=unmatched_marker\n", port_frame, id);
+                    }
+                    break;
+                }
+#endif
                 if (cmd->words.w1 == PORT_HUD_TAG_ON || cmd->words.w1 == PORT_HUD_TAG_OFF || cmd->words.w1 == PORT_HUD_TAG_CENTRE) {
                     int mode = cmd->words.w1 == PORT_HUD_TAG_ON ? 1 : cmd->words.w1 == PORT_HUD_TAG_CENTRE ? 2 : 0;
                     if (mode != gfx_hud_anchor) gfx_flush();
@@ -5813,6 +5875,11 @@ void gfx_run(Gfx *commands) {
     gfx_debug_frame = 0; // a one-frame switch (set by the input script / debug hooks before the frame)
     gfx_flush();
 #ifdef PM64
+    if (sStarDiag.id) {
+        port_log("PM-PAL-GFX-003 error frame=%u task=%u reason=missing_end_marker\n", port_frame, sStarDiag.id);
+        gfx_star_diag_end(sStarDiag.id, port_frame);
+        sStarDiag.id = 0;
+    }
     if (pm64_rt_active) { gfx_soft_rt_end(); pm64_rt_active = false; }
     pm_gen_off();
 #endif

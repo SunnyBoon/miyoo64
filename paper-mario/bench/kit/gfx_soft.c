@@ -545,6 +545,51 @@ static struct {
         bool ci4_raw;
     } ci4;
 } sItemTrace SAVESTATE_EXCLUDE;
+#ifdef PM64
+/* Counts only this tagged body. A vector row or special depth-only path is
+ * explicitly marked incomplete instead of pretending its pixels were seen. */
+typedef struct { int valid, x, y, fa, amin, pass, filter, t0a, t1a, shade, u, v, dist; } StarAlphaSample;
+static struct {
+    bool active, incomplete, probe, anchors, state_valid;
+    unsigned calls; uint64_t z, alpha, writes;
+    int ax[4], ay[4]; StarAlphaSample samples[2][4];
+    unsigned w0, w1, two, fast, gen, prim, env, plod, cc9, t0_used, t1_used, amin, alpha_on, edge, full, filter;
+    unsigned tex0, tex1; int tex0_valid, tex1_valid, tex0_w, tex0_h, tex1_w, tex1_h;
+} sStarPixels SAVESTATE_EXCLUDE;
+void gfx_star_diag_begin(int probe) { memset(&sStarPixels, 0, sizeof sStarPixels); sStarPixels.active = true; sStarPixels.probe = probe != 0; }
+static void star_alpha_sample(int x, int y, int fa, int amin, int pass, int filter, int t0a, int t1a, int shade, int u, int v) {
+    if (!sStarPixels.active || !sStarPixels.probe || !sStarPixels.anchors || pass < 0) return;
+    for (int i = 0; i < 4; i++) {
+        int dx = x - sStarPixels.ax[i], dy = y - sStarPixels.ay[i], dist = dx*dx + dy*dy;
+        StarAlphaSample *p = &sStarPixels.samples[pass][i];
+        if (!p->valid || dist < p->dist) {
+            *p = (StarAlphaSample){1,x,y,fa,amin,pass,filter,t0a,t1a,shade,u,v,dist};
+        }
+    }
+}
+void gfx_star_diag_end(unsigned id, unsigned frame) {
+    port_log("PM-PAL-GFX-003 raster frame=%u task=%u calls=%u z_reject=%llu alpha_reject=%llu writes=%llu complete=%d\n",
+             frame, id, sStarPixels.calls, (unsigned long long)sStarPixels.z,
+             (unsigned long long)sStarPixels.alpha, (unsigned long long)sStarPixels.writes, !sStarPixels.incomplete);
+    if (sStarPixels.probe) {
+        if (sStarPixels.state_valid && sStarPixels.gen) {
+            port_log("PM-PAL-GFX-003 alpha_state frame=%u task=%u generic=1 combine=%06X/%08X cycles=%u fast=%u cc9=%u t0_used=%u t1_used=%u prim_a=%u env_a=%u prim_lod=%u amin=%u alpha_on=%u edge=%u full=%u first_filter=%s tex0=%u:%d:%dx%d tex1=%u:%d:%dx%d\n",
+                frame,id,sStarPixels.w0,sStarPixels.w1,sStarPixels.two?2:1,sStarPixels.fast,sStarPixels.cc9,sStarPixels.t0_used,sStarPixels.t1_used,sStarPixels.prim,sStarPixels.env,sStarPixels.plod,sStarPixels.amin,sStarPixels.alpha_on,sStarPixels.edge,sStarPixels.full,sStarPixels.filter?"bilinear":"nearest",sStarPixels.tex0,sStarPixels.tex0_valid,sStarPixels.tex0_w,sStarPixels.tex0_h,sStarPixels.tex1,sStarPixels.tex1_valid,sStarPixels.tex1_w,sStarPixels.tex1_h);
+        } else if (sStarPixels.state_valid) port_log("PM-PAL-GFX-003 alpha_state frame=%u task=%u generic=0 combine=unavailable cycles=unavailable prim_a=unavailable env_a=unavailable amin=%u alpha_on=%u edge=%u full=%u first_filter=%s tex0=%u:%d:%dx%d tex1=%u:%d:%dx%d\n",frame,id,sStarPixels.amin,sStarPixels.alpha_on,sStarPixels.edge,sStarPixels.full,sStarPixels.filter?"bilinear":"nearest",sStarPixels.tex0,sStarPixels.tex0_valid,sStarPixels.tex0_w,sStarPixels.tex0_h,sStarPixels.tex1,sStarPixels.tex1_valid,sStarPixels.tex1_w,sStarPixels.tex1_h);
+        else port_log("PM-PAL-GFX-003 alpha_state frame=%u task=%u state=unavailable\n",frame,id);
+        for (int pass=0; pass<2; pass++) for (int i=0; i<4; i++) {
+            const StarAlphaSample *p = &sStarPixels.samples[pass][i];
+            if (p->valid) port_log("PM-PAL-GFX-003 alpha_sample frame=%u task=%u result=%s anchor=%d anchor_xy=%d,%d xy=%d,%d d2=%d fa=%d amin=%d filter=%s t0a=%d t1a=%d shade_a=%d uv16=%d,%d unavailable=-1\n",frame,id,pass?"pass":"reject",i,sStarPixels.ax[i],sStarPixels.ay[i],p->x,p->y,p->dist,p->fa,p->amin,p->filter?"bilinear":"nearest",p->t0a,p->t1a,p->shade,p->u,p->v);
+        }
+    }
+    sStarPixels.active = false; sStarPixels.probe = false;
+}
+#define STAR_PIXEL_INC(x) do { if (sStarPixels.active) sStarPixels.x++; } while (0)
+#define STAR_SAMPLE(x,y,fa,amin,pass,filter,t0,t1,shade,u,v) do { if (sStarPixels.probe) star_alpha_sample(x,y,fa,amin,pass,filter,t0,t1,shade,u,v); } while (0)
+#else
+#define STAR_PIXEL_INC(x) ((void)0)
+#define STAR_SAMPLE(x,y,fa,amin,pass,filter,t0,t1,shade,u,v) ((void)0)
+#endif
 static inline int32_t gen_t1(int32_t x, int i);
 void gfx_itemtrace_begin(void) { memset(&sItemTrace, 0, sizeof(sItemTrace)); sItemTrace.active = true; }
 int gfx_itemtrace_active(void) { return sItemTrace.active; }
@@ -1779,6 +1824,20 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
 #else
     const int amin = tex_edge ? 0x55 : 8;
 #endif
+#ifdef PM64
+    if (sStarPixels.active && sStarPixels.probe && !sStarPixels.state_valid) {
+        sStarPixels.state_valid = true; sStarPixels.gen = gen;
+        sStarPixels.w0=sGen.w0; sStarPixels.w1=sGen.w1; sStarPixels.two=sGen.two; sStarPixels.fast=sGen.fast;
+        sStarPixels.prim=sGen.prim[3]; sStarPixels.env=sGen.env[3]; sStarPixels.plod=sGen.plod; sStarPixels.cc9=sCc9; sStarPixels.t0_used=sGen.t0; sStarPixels.t1_used=sGen.t1; sStarPixels.amin=amin;
+        sStarPixels.alpha_on=sUseAlpha; sStarPixels.edge=tex_edge; sStarPixels.full=sEdgeFullCoverage; sStarPixels.filter=use_bilin;
+        sStarPixels.tex0=sBoundTex[0]; sStarPixels.tex1=sBoundTex[1];
+        sStarPixels.tex0_valid=sTex[sBoundTex[0]].valid; sStarPixels.tex1_valid=sTex[sBoundTex[1]].valid;
+        sStarPixels.tex0_w=sTex[sBoundTex[0]].w; sStarPixels.tex0_h=sTex[sBoundTex[0]].h;
+        sStarPixels.tex1_w=sTex[sBoundTex[1]].w; sStarPixels.tex1_h=sTex[sBoundTex[1]].h;
+        for (int i=0; i<4; i++) { sStarPixels.ax[i]=minx+(maxx-minx)*((i&1)?3:1)/4; sStarPixels.ay[i]=miny+(maxy-miny)*((i&2)?3:1)/4; }
+        sStarPixels.anchors=true;
+    }
+#endif
     const bool rgb_tex = tex && sCurShader && sCurShader->rgb_tex, rgb_in = !sCurShader || sCurShader->rgb_in;
     const bool a_tex = tex && sCurShader && sCurShader->a_tex, a_in = !sCurShader || sCurShader->a_in;
     const bool rgb_texa = sCurShader && sCurShader->rgb_texa, rgb_decal = sCurShader && sCurShader->rgb_decal;
@@ -1861,6 +1920,9 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
     const bool gen_rows = false;
 #endif
     CmTri cmt;
+#ifdef PM64
+    if (sStarPixels.active && (cm_rows || gen_rows)) sStarPixels.incomplete = true;
+#endif
     if (cm_rows || gen_rows) {
         const int32_t d[4] = { bdq, gdq, rdq, adq };
         cmt.px = texpx; cmt.w = tw; cmt.h = th; cmt.ws = ws; cmt.wt = wt; cmt.mu = tmask_u; cmt.mv = tmask_v; cmt.t16 = t16;
@@ -2114,18 +2176,18 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
                         if (g1px && gt0) t1 = bilerp(g1px, g1_16, g1w, g1h, g1ws, g1wt, gen_t1(uf, 0), gen_t1(vf, 1), g1mu, g1mv);
 #define GEN_COLOR_NEAREST                                                                              \
                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_NEAREST                                      \
-                        itemtrace_t1 = t1;                                                               \
+                        itemtrace_t1 = t1; if (sStarPixels.probe) { if (gt0 && texpx) star_t0 = (int)(t0 >> 24); if ((!gt0 && texpx) || (gt0 && g1px)) star_t1 = (int)(t1 >> 24); }                                                               \
                         const uint32_t c = pm_gen_eval(t0, t1, sr, sg, sb, sa);                         \
                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
 #define GEN_COLOR_BILINEAR                                                                             \
                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_BILINEAR                                     \
-                        itemtrace_t1 = t1;                                                               \
+                        itemtrace_t1 = t1; if (sStarPixels.probe) { if (gt0 && texpx) star_t0 = (int)(t0 >> 24); if ((!gt0 && texpx) || (gt0 && g1px)) star_t1 = (int)(t1 >> 24); }                                                               \
                         const uint32_t c = pm_gen_eval(t0, t1, sr, sg, sb, sa);                         \
                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
 /* The fast paths (gen_classify_fast), SMOOTH only: F is a constant in each span loop. */
 #define GEN_FAST(BILIN, F)                                                                             \
                     {   uint32_t t0 = 0, t1 = 0; GEN_FETCH_##BILIN                                      \
-                        itemtrace_t1 = t1;                                                               \
+                        itemtrace_t1 = t1; if (sStarPixels.probe) { if (gt0 && texpx) star_t0 = (int)(t0 >> 24); if ((!gt0 && texpx) || (gt0 && g1px)) star_t1 = (int)(t1 >> 24); }                                                               \
                         const uint32_t c = pm_gen_fast(F, t0, t1, sr, sg, sb, sa);                      \
                         fr = (c >> 16) & 255; fg = (c >> 8) & 255; fb = c & 255; fa = c >> 24; }
 #else
@@ -2148,15 +2210,15 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
 #define SPAN_LOOP_X(TEX, ZTEST, ALPHA, BILIN, GEN, FLAT, CM)                                           \
             for (int i = 0; i < span; i++, idx++, uf += duf, vf += dvf, zq += zdq COLSTEP_##FLAT) {     \
                 const int uz = clamp16_sh8(zq);                                                         \
-                if (ZTEST) { if (uz > zb[idx] + zbias) { if (itemtrace_match()) sItemTrace.z_reject++; continue; } } \
+                if (ZTEST) { if (uz > zb[idx] + zbias) { if (itemtrace_match()) sItemTrace.z_reject++; STAR_PIXEL_INC(z); continue; } } \
                 const int sr = FLAT ? fsr : clamp8_sh16(rq), sg = FLAT ? fsg : clamp8_sh16(gq);         \
                 const int sb = FLAT ? fsb : clamp8_sh16(bq), sa = FLAT ? fsa : clamp8_sh16(aq);         \
-                int fr, fg, fb, fa; uint32_t itemtrace_t1 = 0;                                         \
+                int fr, fg, fb, fa, star_t0 = -1, star_t1 = -1; uint32_t itemtrace_t1 = 0;                                         \
                 if (GEN == 1) { GEN_COLOR_##BILIN }                                                     \
                 else if (GEN > 10) { GEN_FAST(BILIN, GEN - 10) }                                        \
                 else if (TEX) {                                                                         \
                     FETCH_##BILIN                                                                       \
-                    const int ta = (t>>24)&0xff;                                                        \
+                    const int ta = (t>>24)&0xff; if (TEX) star_t0 = ta;                                                        \
                     const int tr = (!CM && rgb_texa) ? ta : (t>>16)&0xff, tg = (!CM && rgb_texa) ? ta : (t>>8)&0xff, tb = (!CM && rgb_texa) ? ta : t&0xff; \
                     if (CM)             { fr=div255(tr*sr); fg=div255(tg*sg); fb=div255(tb*sb); }       \
                     else if (!rgb_tex)  { fr=sr; fg=sg; fb=sb; }                                        \
@@ -2170,8 +2232,9 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
                     else                { fr=div255(tr*sr); fg=div255(tg*sg); fb=div255(tb*sb); }       \
                     fa = !a_tex ? sa : (!a_in ? ta : div255(ta*sa));                                    \
                 } else { fr=sr; fg=sg; fb=sb; fa=sa; }                                                  \
+                STAR_SAMPLE(idx % sW, idx / sW, fa, amin, (ALPHA) ? (fa >= amin) : -1, ITEMTRACE_FILTER(BILIN), star_t0, star_t1, sa, uf, vf); \
                 if (ALPHA) {                                                                            \
-                    if (fa < amin) { itemtrace_alpha_reject(idx % sW, idx / sW, uf, vf, tw, th, ws, wt, tmask_u, tmask_v, itemtrace_t1, fa, amin, ITEMTRACE_FILTER(BILIN)); continue; } \
+                    if (fa < amin) { STAR_PIXEL_INC(alpha); itemtrace_alpha_reject(idx % sW, idx / sW, uf, vf, tw, th, ws, wt, tmask_u, tmask_v, itemtrace_t1, fa, amin, ITEMTRACE_FILTER(BILIN)); continue; } \
                     if (fa < 255 && ablend) {                                                           \
                         const uint32_t d = fbuf[idx];                                                   \
                         const int dr=(d>>16)&0xff, dg=(d>>8)&0xff, db=d&0xff;                           \
@@ -2181,6 +2244,7 @@ static int raster_tri(const SoftVtx *v0, const SoftVtx *v1, const SoftVtx *v2, b
                     }                                                                                   \
                 }                                                                                       \
                 if (itemtrace_match()) { sItemTrace.writes++; itemtrace_sample(idx % sW, idx / sW, uz, fa, fr, fg, fb); } \
+                STAR_PIXEL_INC(writes);                                                                  \
                 fbuf[idx] = argb((uint8_t)fr,(uint8_t)fg,(uint8_t)fb,255);                              \
                 if (ZTEST && dmask) zb[idx] = (uint16_t)uz;                                             \
             }
@@ -2380,6 +2444,7 @@ static void gfx_soft_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t 
     const SoftVtx *v = (const SoftVtx *)buf_vbo;
 #ifdef PM64
     if (sPrimZMode == 1 && sUnified && !sRtActive) {
+        if (sStarPixels.active) sStarPixels.incomplete = true;
         for (size_t i = 0; i < num_tris; i++) primz_tri(&v[i*3+0], &v[i*3+1], &v[i*3+2]);
         PROF_END(sPhase3D ? PROF_R3D : PROF_R2D);
         return;
@@ -2388,6 +2453,7 @@ static void gfx_soft_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t 
     if (!sUnified) { if (sPhase3D) { sIntDirty = true; sIntClean = false; } else sNatDirty = true; }
     for (size_t i = 0; i < num_tris; i++) {
         const int ppon = sPpX != -1 && pp_on(); const uint32_t ppb = ppon ? sFB[sPpY * sW + sPpX] : 0;
+        STAR_PIXEL_INC(calls);
         const int px = raster_tri(&v[i*3+0], &v[i*3+1], &v[i*3+2], true);
         if (itemtrace_match()) sItemTrace.tris++;
         if (ppon) pp_log("tri", ppb);
