@@ -516,9 +516,9 @@ static inline bool own_px(const OwnTri *t, int x, float py) {
  * take this pixel's TEXEL0 for the latter. Without the swap, the light rays over Peach's
  * castle (3_letter, FC309861 550EFF4F: cycle 2 alpha (COMBINED - TEXEL0) * PRIM) came out
  * fully transparent. */
-enum { S_COMB, S_T0, S_T1, S_PRIM, S_SHADE, S_ENV, S_ONE, S_ZERO, S_COMBA, S_T0A, S_T1A, S_PRIMA, S_SHADEA, S_ENVA, S_PLOD, S_NOISE, S_N };
+enum { S_COMB, S_T0, S_T1, S_PRIM, S_SHADE, S_ENV, S_ONE, S_ZERO, S_COMBA, S_T0A, S_T1A, S_PRIMA, S_SHADEA, S_ENVA, S_PLOD, S_NOISE, S_K4, S_N };
 static struct {
-    bool on, two, t0, t1;
+    bool on, two, t0, t1, k4_used;
     int8_t rgb[2][4], al[2][4];
     int prim[4], env[4], plod, ds, dt;
     int32_t t1a[2], t1c[2]; int t1k[2]; /* TEXEL1 from TEXEL0's S/T: (x + a) * 2^k + c, 16.16 texels (gen_t1) */
@@ -711,7 +711,9 @@ static inline int32_t gen_t1_l(int32_t x, int32_t a, int32_t c, int k) {
     return k == 0 ? x + a + c : k > 0 ? (int32_t) ((uint32_t) (x + a) << k) + c : ((x + a) >> -k) + c;
 }
 static int8_t gm_rgb_a(int v) { return v <= 5 ? v : v == 6 ? S_ONE : v == 7 ? S_NOISE : S_ZERO; }
-static int8_t gm_rgb_b(int v) { return v <= 5 ? v : S_ZERO; } /* CENTER / K4: 0 */
+static uint16_t sK4Raw SAVESTATE_EXCLUDE;
+void gfx_soft_pm_k4(uint16_t raw) { sK4Raw = raw & 0x1ff; }
+static int8_t gm_rgb_b(int v) { return v <= 5 ? v : v == 7 ? S_K4 : S_ZERO; } /* CENTER stays 0 */
 static int8_t gm_rgb_c(int v) {
     static const int8_t t[16] = { S_COMB, S_T0, S_T1, S_PRIM, S_SHADE, S_ENV, S_ZERO, S_COMBA, S_T0A, S_T1A, S_PRIMA, S_SHADEA, S_ENVA, S_ZERO, S_PLOD, S_ZERO };
     return v < 16 ? t[v] : S_ZERO; /* SCALE / LOD_FRACTION / K5: 0 */
@@ -738,6 +740,8 @@ void gfx_soft_pm_generic(bool on, uint32_t w0, uint32_t w1, bool two_cycle, cons
     sGen.rgb[1][2] = gm_rgb_c(w0 & 31);        sGen.rgb[1][3] = gm_rgb_d((w1 >> 6) & 7);
     sGen.al[1][0] = gm_a_abd((w1 >> 21) & 7); sGen.al[1][1] = gm_a_abd((w1 >> 3) & 7);
     sGen.al[1][2] = gm_a_c((w1 >> 18) & 7);   sGen.al[1][3] = gm_a_abd(w1 & 7);
+    sGen.k4_used = (sGen.rgb[0][1] == S_K4 && sGen.rgb[0][2] != S_ZERO) ||
+                   (two_cycle && sGen.rgb[1][1] == S_K4 && sGen.rgb[1][2] != S_ZERO);
     if (!two_cycle && gfx_soft_1cyc_t1) { /* 1-cycle: TEXEL1 is TEXEL0 (gfx_pc.c pm_1cyc_t1_on) */
         for (int i = 0; i < 4; i++) {
             if (sGen.rgb[0][i] == S_T1) sGen.rgb[0][i] = S_T0;
@@ -791,6 +795,7 @@ static void gen_build_ops(void) {
     for (int i = 0; i < 4; i++) {
         sGenConst[S_PRIM][i] = sGen.prim[i]; sGenConst[S_ENV][i] = sGen.env[i];
         sGenConst[S_ONE][i] = 255; sGenConst[S_ZERO][i] = 0; sGenConst[S_PLOD][i] = sGen.plod; sGenConst[S_NOISE][i] = 128;
+        sGenConst[S_K4][i] = sK4Raw;
     }
     for (int k = 0; k < 2; k++)
         for (int ch = 0; ch < 4; ch++)
@@ -854,6 +859,7 @@ static void gen_classify_fast(void) {
     if (sOn < 0) { const char *e = getenv("PM64_GENFAST"); sOn = !(e && e[0] == '0'); }
     sGen.fast = 0;
     if (!sOn) return; /* the shroud: pm_gen_fast and the NEON rows apply it after the combine, as pm_gen_eval */
+    if (sGen.k4_used) return; /* only the generic 9-bit table handles K4 */
     const int8_t *r0 = sGen.rgb[0], *a0 = sGen.al[0], *r1 = sGen.rgb[1], *a1 = sGen.al[1];
     if (!sGen.two) { /* 7 (1-cycle): (K - SHADE) x T0 + SHADE, alpha T0a -- FC60FEC1 44FE7339, the Bowser fight's glow */
         if (sGen.t0 && !sGen.t1 && gen_const(r0[0]) && r0[1] == S_SHADE && r0[2] == S_T0 && r0[3] == S_SHADE &&
@@ -1046,7 +1052,7 @@ static inline uint32_t pm_gen_eval(uint32_t t0, uint32_t t1, int sr, int sg, int
     sGenPix[2][0] = sr; sGenPix[2][1] = sg; sGenPix[2][2] = sb; sGenPix[2][3] = sa;
     sGenPix[3][0] = sGenPix[3][1] = sGenPix[3][2] = sGenPix[3][3] = 0;
     const int nk = sGen.two ? 2 : 1;
-    if (sCc9) { /* PM64_CC9BIT: the RDP's 9-bit combiner (see cc_ext9) */
+    if (sCc9 || sGen.k4_used) { /* K4 requires the RDP's special 9-bit B extension */
         for (int k = 0; k < nk; k++) {
             int out[4];
             for (int ch = 0; ch < 4; ch++) {

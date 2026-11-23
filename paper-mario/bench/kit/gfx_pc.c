@@ -306,6 +306,7 @@ static struct RDP {
     void *color_image_address;
 #ifdef PM64
     uint32_t pm_cc_w0, pm_cc_w1; /* the raw G_SETCOMBINE words, both cycles (pm_cc_generic) */
+    uint16_t pm_k4;             /* raw 9-bit G_SETCONVERT K4 */
     uint8_t pm_prim_lod;         /* G_SETPRIMCOLOR's LOD fraction */
 #endif
 } rdp  __attribute__((aligned(4)));
@@ -2643,6 +2644,15 @@ uint32_t gfx_prof_rebuilds;
  * RDP combiner in gfx_soft (gfx_soft_pm_generic). */
 extern void gfx_soft_pm_generic(bool on, uint32_t w0, uint32_t w1, bool two_cycle, const uint8_t prim[4], const uint8_t env[4],
                                 uint8_t prim_lod, int ds, int dt, const int32_t t1map[6]);
+extern void gfx_soft_pm_k4(uint16_t raw);
+static void gfx_dp_set_convert(uint32_t w1) {
+    const uint16_t k4 = (w1 >> 9) & 0x1ff;
+    if (rdp.pm_k4 != k4) {
+        gfx_flush(); /* pending triangles use the old per-draw combiner */
+        tri_state.valid = false;
+    }
+    rdp.pm_k4 = k4;
+}
 extern void gfx_soft_tex_size(int tile, int *w, int *h);
 extern void gfx_soft_pm_rect_rebase(int s, int t);
 enum { M_COMB, M_T0, M_T1, M_PRIM, M_SHADE, M_ENV, M_ONE, M_ZERO, M_OTHER };
@@ -2869,6 +2879,7 @@ static void pm_gen_setup(bool two_cycle, bool t0, bool t1) {
     }
     gfx_soft_pm_shroud(pm_shroud(), rdp.blend_color.r, rdp.blend_color.g, rdp.blend_color.b);
     { extern bool gfx_soft_1cyc_t1; gfx_soft_1cyc_t1 = pm_1cyc_t1_on(); }
+    gfx_soft_pm_k4(rdp.pm_k4);
     gfx_soft_pm_generic(true, rdp.pm_cc_w0, rdp.pm_cc_w1, two_cycle, prim, env, rdp.pm_prim_lod, ds, dt, t1map);
     if (gfx_itemtrace_active() && rdp.pm_cc_w0 == 0xFFFFFFu && rdp.pm_cc_w1 == 0xFFFD7438u) {
         const int t0i = pm_prim_tile;
@@ -5604,6 +5615,11 @@ static void gfx_run_dl(Gfx* cmd) {
             case G_SETFILLCOLOR:
                 gfx_dp_set_fill_color(cmd->words.w1);
                 break;
+#ifdef PM64
+            case G_SETCONVERT:
+                gfx_dp_set_convert(cmd->words.w1);
+                break;
+#endif
             case G_SETCOMBINE:
 #ifdef PM64
                 rdp.pm_cc_w0 = cmd->words.w0 & 0x00FFFFFF;
